@@ -2,7 +2,7 @@
 An example of how to launch the training script on Beaker.
 Run this with:
 
-    python src/scripts/train/ppt2/phase0_launch.py run_name [OVERRIDES...]
+    python src/scripts/train/ppt2/phase0_launch.py run01 ai2/jupiter-cirrascale-2 [OVERRIDES...]
 """
 
 import sys
@@ -16,10 +16,9 @@ def build_config(run_name: str, cluster: str, overrides: List[str]) -> BeakerLau
     return BeakerLaunchConfig(
         name=f"phase0-train-{generate_uuid()[:8]}",
         budget="ai2/allennlp",
-        cmd=["src/scripts/train/ppt2/phase0.py", run_name, *overrides],
+        cmd=["src/scripts/train/ppt2/phase0_ai2.py", run_name, *overrides],
         task_name="train",
         workspace="ai2/willm-ppt2",
-        description="PPT2 phase0",
         clusters=[cluster],
         num_nodes=1,
         num_gpus=8,

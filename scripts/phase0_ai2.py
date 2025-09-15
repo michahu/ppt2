@@ -161,13 +161,15 @@ def build_trainer_config(common: CommonComponents) -> TrainerConfig:
         assert len(common.launch.clusters) == 1
         cluster = common.launch.clusters[0]
 
+    root_dir = "/weka/oe-training-default/ai2-llm"
     run_name = (
         f"{common.run_name}-{datetime.now().astimezone().strftime('%Y%m%dT%H%M%z')}"
     )
 
     return (
         TrainerConfig(
-            save_folder=f"gs://ai2-llm/checkpoints/{common.run_name}/",
+            # Previously was gs://ai2-llm/..., which required GOOGLE_CREDENTIALS secret
+            save_folder=f"{root_dir}/checkpoints/willm/linear-rnns/{common.run_name}/",
             save_overwrite=True,
             metrics_collect_interval=10,
             cancel_check_interval=cancel_check_interval,

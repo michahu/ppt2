@@ -169,7 +169,7 @@ def build_trainer_config(common: CommonComponents) -> TrainerConfig:
     return (
         TrainerConfig(
             # Previously was gs://ai2-llm/..., which required GOOGLE_CREDENTIALS secret
-            save_folder=f"{root_dir}/checkpoints/willm/linear-rnns/{common.run_name}/",
+            save_folder=f"{root_dir}/checkpoints/willm/ppt2/{common.run_name}/",
             save_overwrite=True,
             metrics_collect_interval=10,
             cancel_check_interval=cancel_check_interval,

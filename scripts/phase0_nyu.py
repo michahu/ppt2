@@ -187,22 +187,12 @@ def build_trainer_config(common: CommonComponents) -> TrainerConfig:
             ),
         )
         .with_callback(
-            "comet",
-            CometCallback(
-                name=run_name,
-                workspace="ai2",
-                project="olmo3",
-                enabled=False,
-                cancel_check_interval=cancel_check_interval,
-            ),
-        )
-        .with_callback(
             "wandb",
             WandBCallback(
                 name=run_name,
                 group=common.run_name,
                 entity="ai2-llm",
-                project="olmo3",
+                project="willm-ppt2",
                 enabled=True,
                 cancel_check_interval=cancel_check_interval,
             ),

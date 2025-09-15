@@ -4,9 +4,19 @@ Train a 1B OLMo model. Run this script without any arguments to see usage info.
 TODO: Point to custom data: gs://allennlp-willm/ppt2/shuffle-dyck.npy
 """
 
+import os
+import sys
+from dataclasses import dataclass
 from datetime import datetime
+from typing import List, cast
 
-from olmo_core.config import DType
+from olmo_core.config import Config, DType
+from olmo_core.data import (
+    NumpyDataLoaderConfig,
+    NumpyDatasetConfig,
+    NumpyDatasetType,
+    TokenizerConfig,
+)
 from olmo_core.distributed.parallel import DataParallelType
 from olmo_core.float8 import Float8Config
 from olmo_core.internal.common import CLUSTER_TO_GPU_TYPE
@@ -14,21 +24,24 @@ from olmo_core.internal.experiment import CommonComponents, main
 from olmo_core.nn.attention import SlidingWindowAttentionConfig
 from olmo_core.nn.transformer import TransformerConfig
 from olmo_core.optim import CosWithWarmup, OptimGroupOverride, SkipStepAdamWConfig
-from olmo_core.train import Duration, TrainerConfig
-from olmo_core.train.callbacks import CheckpointerCallback, CometCallback, WandBCallback, ConfigSaverCallback
+from olmo_core.train import (
+    Duration,
+    TrainerConfig,
+    prepare_training_environment,
+    teardown_training_environment,
+)
+from olmo_core.train.callbacks import (
+    CheckpointerCallback,
+    CometCallback,
+    ConfigSaverCallback,
+    WandBCallback,
+)
 from olmo_core.train.train_module import (
     TransformerDataParallelConfig,
     TransformerDataParallelWrappingStrategy,
     TransformerTrainModuleConfig,
 )
-
 from olmo_core.utils import seed_all
-from typing import List, cast
-import sys
-from olmo_core.train import (
-    prepare_training_environment,
-    teardown_training_environment,
-)
 
 # === willm: taken from https://arxiv.org/abs/2502.19249 ===
 SEQUENCE_LENGTH = 2048
@@ -40,8 +53,28 @@ N_TOKENS = 500 * GLOBAL_BATCH_SIZE  # 35M tokens
 # GLOBAL_BATCH_SIZE = 4 * 1024 * 1024
 # WARMUP_STEPS = 2000
 
+
+DATA_ROOT = "/scratch/myh2014/ppt2/data".rstrip("/")
+DATA_PATHS = [
+    f"{DATA_ROOT}/olmo_ppt.npy",
+]
+DATA_WORK_DIR = "scratch/myh2014/ppt2/data/"
+
+
+@dataclass
+class ExperimentConfig(Config):
+    model: TransformerConfig
+    dataset: NumpyDatasetConfig
+    data_loader: NumpyDataLoaderConfig
+    train_module: TransformerTrainModuleConfig
+    trainer: TrainerConfig
+    init_seed: int = 12536
+
+
 def build_model_config(common: CommonComponents) -> TransformerConfig:
-    config = TransformerConfig.olmo2_1B_v2(vocab_size=common.tokenizer.padded_vocab_size())
+    config = TransformerConfig.olmo2_1B_v2(
+        vocab_size=common.tokenizer.padded_vocab_size()
+    )
     config.block.attention.sliding_window = SlidingWindowAttentionConfig(
         force_full_attention_on_first_layer=False,
         force_full_attention_on_last_layer=True,
@@ -66,7 +99,9 @@ def build_train_module_config(common: CommonComponents) -> TransformerTrainModul
             weight_decay=0.033,
             betas=(0.9, 0.95),
             group_overrides=[
-                OptimGroupOverride(params=["embeddings.weight"], opts=dict(weight_decay=0.0))
+                OptimGroupOverride(
+                    params=["embeddings.weight"], opts=dict(weight_decay=0.0)
+                )
             ],
         ),
         compile_model=True,
@@ -92,7 +127,9 @@ def build_trainer_config(common: CommonComponents) -> TrainerConfig:
         assert len(common.launch.clusters) == 1
         cluster = common.launch.clusters[0]
 
-    run_name = f"{common.run_name}-{datetime.now().astimezone().strftime('%Y%m%dT%H%M%z')}"
+    run_name = (
+        f"{common.run_name}-{datetime.now().astimezone().strftime('%Y%m%dT%H%M%z')}"
+    )
 
     return (
         TrainerConfig(
@@ -100,8 +137,12 @@ def build_trainer_config(common: CommonComponents) -> TrainerConfig:
             save_overwrite=True,
             metrics_collect_interval=10,
             cancel_check_interval=cancel_check_interval,
-            max_duration=Duration.tokens(int(10 * N_TOKENS)),  # willm: 1 * N_TOKENS is original
-            hard_stop=Duration.tokens(int(2.5e12 + GLOBAL_BATCH_SIZE * (WARMUP_STEPS / 2))), # After this, we switch to a longer cosine to reach 6T.
+            max_duration=Duration.tokens(
+                int(10 * N_TOKENS)
+            ),  # willm: 1 * N_TOKENS is original
+            hard_stop=Duration.tokens(
+                int(2.5e12 + GLOBAL_BATCH_SIZE * (WARMUP_STEPS / 2))
+            ),  # After this, we switch to a longer cosine to reach 6T.
         )
         .with_callback(
             "checkpointer",
@@ -137,17 +178,45 @@ def build_trainer_config(common: CommonComponents) -> TrainerConfig:
             SEQUENCE_LENGTH,
             cluster,
             task_set="fast",
-            eval_interval=1000
+            eval_interval=1000,
         )
     )
 
 
+def build_config(run_name: str, overrides: List[str]) -> ExperimentConfig:
+    tokenizer_config = TokenizerConfig.dolma2()
+
+    model_config = build_model_config()
+
+    dataset_config = NumpyDatasetConfig(
+        data_paths=DATA_PATHS,
+        name=NumpyDatasetType.fsl,
+        work_dir=DATA_WORK_DIR,
+        tokenizer=tokenizer_config,
+        sequence_length=SEQUENCE_LENGTH,
+        max_target_sequence_length=8192,
+    )
+
+    data_loader_config = NumpyDataLoaderConfig(
+        global_batch_size=256 * SEQUENCE_LENGTH,
+        seed=0,
+        num_workers=4,
+    )
+
+    train_module_config = build_train_module_config()
+
+    trainer_config = build_trainer_config()
+
+    return ExperimentConfig(
+        model=model_config,
+        dataset=dataset_config,
+        data_loader=data_loader_config,
+        train_module=train_module_config,
+        trainer=trainer_config,
+    ).merge(overrides)
+
+
 def main(run_name: str, overrides: List[str]):
-    """Custom main training function.
-    
-    Cf. https://github.com/allenai/OLMo-core/blob/willm/ppt2/src/examples/llama/train.py
-    """
-    # TODO: Fix this
     config = build_config(run_name, overrides)
 
     # Set RNG states on all devices.
@@ -157,7 +226,9 @@ def main(run_name: str, overrides: List[str]):
     model = config.model.build(init_device="meta")
     train_module = config.train_module.build(model)
     dataset = config.dataset.build()
-    data_loader = config.data_loader.build(dataset, dp_process_group=train_module.dp_process_group)
+    data_loader = config.data_loader.build(
+        dataset, dp_process_group=train_module.dp_process_group
+    )
     trainer = config.trainer.build(train_module, data_loader)
 
     # Save config to W&B and each checkpoint dir.

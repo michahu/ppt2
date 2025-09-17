@@ -61,7 +61,7 @@ def get_launch_config(run_name, cluster) -> BeakerLaunchConfig:
     # Add initial setup steps to authenticate GitHub CLI.
     launch_config.setup_steps = GITHUB_AUTH_STEPS + launch_config.setup_steps
 
-    # Allow dirty state.
+    launch_config.preemptible = False
     launch_config.allow_dirty = True
 
     return launch_config

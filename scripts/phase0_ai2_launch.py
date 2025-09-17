@@ -10,22 +10,7 @@ from typing import List
 
 from olmo_core.launch.beaker import BeakerLaunchConfig
 from olmo_core.utils import generate_uuid, prepare_cli_environment
-
-
-def build_config(run_name: str, cluster: str, overrides: List[str]) -> BeakerLaunchConfig:
-    return BeakerLaunchConfig(
-        name=f"phase0-train-{generate_uuid()[:8]}",
-        budget="ai2/oe-base",
-        cmd=["src/scripts/train/ppt2/phase0_ai2.py", run_name, *overrides],
-        task_name="train",
-        workspace="ai2/willm-ppt2",
-        clusters=[cluster],
-        num_nodes=1,
-        num_gpus=8,
-        shared_filesystem=True,
-        nfs=True,
-        allow_dirty=True,
-    )
+from olmo_core.internal.common import build_launch_config
 
 
 if __name__ == "__main__":
@@ -37,4 +22,6 @@ if __name__ == "__main__":
 
     prepare_cli_environment()
 
-    build_config(run_name, cluster, overrides).launch(follow=True)
+    root_dir = "/weka/oe-training-default/ai2-llm"
+    cmd = sys.argv
+    build_launch_config(run_name, root_dir, cmd, cluster).launch(follow=True)

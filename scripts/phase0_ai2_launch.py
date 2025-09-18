@@ -21,8 +21,10 @@ from olmo_core.internal.common import build_launch_config
 GITHUB_AUTH_STEPS = [
     "conda install gh --channel conda-forge",
     # assumes that conda is installed, which is true for our beaker images. # TODO: add to image
-    "echo $GITHUB_TOKEN | gh auth login --with-token",
-    # this is possibly redundant?
+    # Uses GITHUB_TOKEN and won't print it in the logs.
+    "gh auth login",
+    # The following was throwing error and logging env variable.
+    # "echo $GITHUB_TOKEN | gh auth login --with-token",
 ]
 
 
@@ -61,7 +63,7 @@ def get_launch_config(run_name, cluster) -> BeakerLaunchConfig:
     # Add initial setup steps to authenticate GitHub CLI.
     launch_config.setup_steps = GITHUB_AUTH_STEPS + launch_config.setup_steps
 
-    launch_config.preemptible = False
+    launch_config.preemptible = True
     launch_config.allow_dirty = True
 
     return launch_config

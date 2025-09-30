@@ -49,7 +49,7 @@ def get_beaker_username() -> Optional[str]:
 def get_launch_config(run_name, cluster) -> BeakerLaunchConfig:
     launch_config = build_launch_config(
         # Match the command that would be created with the normal launcher.
-        cmd=["src/scripts/train/ppt2/phase0_ai2.py", "train", run_name, cluster],
+        cmd=["scripts/phase0_ai2.py", "train", run_name, cluster],
         name=run_name,
         cluster=cluster,
         workspace="ai2/willm-ppt2",

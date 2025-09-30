@@ -168,7 +168,6 @@ def build_trainer_config(common: CommonComponents) -> TrainerConfig:
 
     return (
         TrainerConfig(
-            # Previously was gs://ai2-llm/..., which required GOOGLE_CREDENTIALS secret
             save_folder=f"{root_dir}/checkpoints/willm/ppt2/{common.run_name}/",
             save_overwrite=True,
             metrics_collect_interval=10,
@@ -329,8 +328,9 @@ $ [i]python {sys.argv[0]} {SubCmd.launch} run01 ai2/pluto-cirrascale --launch.nu
         beaker_image=beaker_image,
         num_nodes=num_nodes,
         beaker_workspace=beaker_workspace,
-        use_hostname_constraints=use_hostname_constraints,
-        num_execution_units=num_execution_units,
+        # willm: michael said I might have to uncomment these, but it doesn't seem like it.
+        # use_hostname_constraints=use_hostname_constraints,
+        # num_execution_units=num_execution_units,
     )
 
     cmd.prepare_environment(config)

@@ -26,6 +26,7 @@ GITHUB_AUTH_STEPS = [
     # The following was throwing error and logging env variable.
     # "echo $GITHUB_TOKEN | gh auth login --with-token",
 ]
+GITHUB_AUTH_STEPS = []  # Disable for now due to issues.
 
 
 @lru_cache()

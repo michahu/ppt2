@@ -3,6 +3,7 @@ Train a 1B OLMo model. Run this script without any arguments to see usage info.
 """
 
 import logging
+import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -53,10 +54,10 @@ N_TOKENS = 500 * GLOBAL_BATCH_SIZE  # 35M tokens
 # WARMUP_STEPS = 2000
 
 
-# DATA_ROOT = "/scratch/myh2014/ppt2/data".rstrip("/")
+# DATA_ROOT = ""gs://allennlp-willm/ppt2"
+DATA_ROOT = "/weka/oe-training-default/willm/ppt2"
 DATA_PATHS = [
-    "gs://allennlp-willm/ppt2/shuffle-dyck.npy",
-    # f"{DATA_ROOT}/olmo_ppt.npy",
+    os.path.join(DATA_ROOT, "shuffle-dyck.npy"),
 ]
 DATA_WORK_DIR = "work-dir"
 
@@ -162,14 +163,13 @@ def build_trainer_config(common: CommonComponents) -> TrainerConfig:
         assert len(common.launch.clusters) == 1
         cluster = common.launch.clusters[0]
 
-    root_dir = "/weka/oe-training-default/ai2-llm"
     run_name = (
         f"{common.run_name}-{datetime.now().astimezone().strftime('%Y%m%dT%H%M%z')}"
     )
 
     return (
         TrainerConfig(
-            save_folder=f"{root_dir}/checkpoints/willm/ppt2/{common.run_name}/",
+            save_folder=os.path.join(DATA_ROOT, "checkpoints/{common.run_name}/"),
             save_overwrite=True,
             metrics_collect_interval=10,
             cancel_check_interval=cancel_check_interval,

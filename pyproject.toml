@@ -5,7 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "ai2-olmo-core",
+    "ai2-olmo-core>=2.2.0",
     "beaker-py>=1.37.0,<2.0",
 ]
 

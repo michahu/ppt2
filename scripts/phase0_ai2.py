@@ -53,11 +53,12 @@ N_TOKENS = 500 * GLOBAL_BATCH_SIZE  # 35M tokens
 # WARMUP_STEPS = 2000
 
 
-DATA_ROOT = "/scratch/myh2014/ppt2/data".rstrip("/")
+# DATA_ROOT = "/scratch/myh2014/ppt2/data".rstrip("/")
 DATA_PATHS = [
-    f"{DATA_ROOT}/olmo_ppt.npy",
+    "gs://allennlp-willm/ppt2/shuffle-dyck.npy",
+    # f"{DATA_ROOT}/olmo_ppt.npy",
 ]
-DATA_WORK_DIR = "scratch/myh2014/ppt2/data/"
+DATA_WORK_DIR = "work-dir"
 
 log = logging.getLogger(__name__)
 

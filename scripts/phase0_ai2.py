@@ -169,7 +169,7 @@ def build_trainer_config(common: CommonComponents) -> TrainerConfig:
 
     return (
         TrainerConfig(
-            save_folder=os.path.join(DATA_ROOT, "checkpoints/{common.run_name}/"),
+            save_folder=os.path.join(DATA_ROOT, f"checkpoints/{common.run_name}/"),
             save_overwrite=True,
             metrics_collect_interval=10,
             cancel_check_interval=cancel_check_interval,

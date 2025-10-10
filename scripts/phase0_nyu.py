@@ -33,7 +33,6 @@ from olmo_core.train import (
 )
 from olmo_core.train.callbacks import (
     CheckpointerCallback,
-    CometCallback,
     WandBCallback,
 )
 from olmo_core.train.train_module import (
@@ -53,7 +52,7 @@ N_TOKENS = 500 * GLOBAL_BATCH_SIZE  # 35M tokens
 # WARMUP_STEPS = 2000
 
 
-DATA_ROOT = "/scratch/myh2014/ppt2/data".rstrip("/")
+DATA_ROOT = "/vast/myh2014/data".rstrip("/")
 DATA_PATHS = [
     f"{DATA_ROOT}/olmo_ppt.npy",
 ]
@@ -72,12 +71,12 @@ class ExperimentConfig(Config):
     train_module: TransformerTrainModuleConfig
     trainer: TrainerConfig
     init_seed: int = 12536
-    backend: Optional[str] = "cpu:gloo,cuda:nccl"
 
 
 def build_model_config(common: CommonComponents) -> TransformerConfig:
     config = TransformerConfig.olmo2_1B_v2(
-        vocab_size=common.tokenizer.padded_vocab_size()
+        vocab_size=common.tokenizer.padded_vocab_size(),
+        dtype=DType.bfloat16,
     )
     config.block.attention.sliding_window = SlidingWindowAttentionConfig(
         force_full_attention_on_first_layer=False,
@@ -155,19 +154,13 @@ def build_train_module_config(common: CommonComponents) -> TransformerTrainModul
 def build_trainer_config(common: CommonComponents) -> TrainerConfig:
     cancel_check_interval = 50
 
-    if common.launch is None:
-        cluster = "local"
-    else:
-        assert len(common.launch.clusters) == 1
-        cluster = common.launch.clusters[0]
-
     run_name = (
         f"{common.run_name}-{datetime.now().astimezone().strftime('%Y%m%dT%H%M%z')}"
     )
 
     return (
         TrainerConfig(
-            save_folder=f"gs://ai2-llm/checkpoints/{common.run_name}/",
+            save_folder=f"./runs/{common.run_name}",
             save_overwrite=True,
             metrics_collect_interval=10,
             cancel_check_interval=cancel_check_interval,
@@ -191,18 +184,11 @@ def build_trainer_config(common: CommonComponents) -> TrainerConfig:
             WandBCallback(
                 name=run_name,
                 group=common.run_name,
-                entity="ai2-llm",
-                project="willm-ppt2",
+                # entity="ai2-llm",
+                # project="willm-ppt2",
                 enabled=True,
                 cancel_check_interval=cancel_check_interval,
             ),
-        )
-        .with_recommended_evals(
-            common.tokenizer,
-            SEQUENCE_LENGTH,
-            cluster,
-            task_set="fast",
-            eval_interval=1000,
         )
     )
 
@@ -272,8 +258,8 @@ def main(
     ],
     trainer_config_builder: Callable[[CommonComponents], TrainerConfig],
     finalize_config: Optional[Callable[[ExperimentConfig], None]] = None,
-    sequence_length: int = 4096,
-    include_default_evals: bool = True,
+    sequence_length: int = 2048,
+    include_default_evals: bool = False,
     intra_document_masking: bool = False,
     include_instance_filter: bool = False,
     beaker_image: str = OLMoCoreBeakerImage.stable,

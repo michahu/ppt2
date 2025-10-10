@@ -3,7 +3,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, cast
 
 import rich
 from olmo_core.config import Config, DType
@@ -13,12 +13,16 @@ from olmo_core.data import (
     NumpyDatasetType,
 )
 from olmo_core.distributed.parallel import DataParallelType
+from olmo_core.distributed.utils import get_local_rank
 from olmo_core.float8 import Float8Config
 from olmo_core.internal.common import CLUSTER_TO_GPU_TYPE
 from olmo_core.internal.experiment import (
     CommonComponents,
     SubCmd,
     build_common_components,
+    launch,
+    launch_prep,
+    prep,
 )
 from olmo_core.launch.beaker import BeakerLaunchConfig, OLMoCoreBeakerImage
 from olmo_core.nn.attention import SlidingWindowAttentionConfig
@@ -27,9 +31,11 @@ from olmo_core.optim import CosWithWarmup, OptimGroupOverride, SkipStepAdamWConf
 from olmo_core.train import (
     Duration,
     TrainerConfig,
+    teardown_training_environment,
 )
 from olmo_core.train.callbacks import (
     CheckpointerCallback,
+    ConfigSaverCallback,
     LMEvaluatorCallbackConfig,
     WandBCallback,
 )
@@ -38,11 +44,14 @@ from olmo_core.train.train_module import (
     TransformerDataParallelWrappingStrategy,
     TransformerTrainModuleConfig,
 )
+from olmo_core.utils import seed_all
 
 SEQUENCE_LENGTH = 2048
 GLOBAL_BATCH_SIZE = 32 * SEQUENCE_LENGTH
 WARMUP_STEPS = 1000
 N_TOKENS = 30_000 * GLOBAL_BATCH_SIZE
+
+DATA_ROOT = "/vast/myh2014/data".rstrip("/")
 
 
 def _read_data_mix_file(filename: str) -> List[str]:
@@ -59,12 +68,12 @@ def _read_data_mix_file(filename: str) -> List[str]:
         for line in f:
             line = line.strip()
             if line and not line.startswith("#"):
-                paths.append(line)
+                # replace http://olmo-data.org/ with DATA_ROOT
+                paths.append(line.replace("http://olmo-data.org/", DATA_ROOT + "/"))
 
     return paths
 
 
-DATA_ROOT = "/vast/myh2014/data".rstrip("/")
 DATA_PATHS = _read_data_mix_file("OLMo-mix-0625-150Bsample.txt")
 EVAL_DATA_PATHS = _read_data_mix_file("v3-small-ppl-validation.txt")
 DATA_WORK_DIR = "scratch/myh2014/ppt2/data/"
@@ -81,13 +90,13 @@ class ExperimentConfig(Config):
     data_loader: NumpyDataLoaderConfig
     train_module: TransformerTrainModuleConfig
     trainer: TrainerConfig
-    backend: Optional[str]
     init_seed: int = 12536
 
 
 def build_model_config(common: CommonComponents) -> TransformerConfig:
     config = TransformerConfig.olmo2_1B_v2(
-        vocab_size=common.tokenizer.padded_vocab_size()
+        vocab_size=common.tokenizer.padded_vocab_size(),
+        dtype=DType.bfloat16,
     )
     config.block.attention.sliding_window = SlidingWindowAttentionConfig(
         force_full_attention_on_first_layer=False,
@@ -165,12 +174,6 @@ def build_train_module_config(common: CommonComponents) -> TransformerTrainModul
 def build_trainer_config(common: CommonComponents) -> TrainerConfig:
     cancel_check_interval = 50
 
-    if common.launch is None:
-        cluster = "local"
-    else:
-        assert len(common.launch.clusters) == 1
-        cluster = common.launch.clusters[0]
-
     run_name = (
         f"{common.run_name}-{datetime.now().astimezone().strftime('%Y%m%dT%H%M%z')}"
     )
@@ -199,33 +202,27 @@ def build_trainer_config(common: CommonComponents) -> TrainerConfig:
             WandBCallback(
                 name=run_name,
                 group=common.run_name,
-                entity="ai2-llm",
-                project="willm-ppt2",
+                # entity="ai2-llm",
+                # project="willm-ppt2",
                 enabled=True,
                 cancel_check_interval=cancel_check_interval,
             ),
         )
-        .with_callback(
-            "lm_evaluator",
-            LMEvaluatorCallbackConfig(
-                eval_dataset=NumpyDatasetConfig(
-                    paths=EVAL_DATA_PATHS,
-                    name=NumpyDatasetType.padded_fsl,
-                    sequence_length=SEQUENCE_LENGTH,
-                    tokenizer=common.tokenizer,
-                    work_dir=DATA_WORK_DIR,
-                ),
-                eval_interval=250,
-                eval_duration=Duration.steps(50),
-            ),
-        )
-        .with_recommended_evals(
-            common.tokenizer,
-            SEQUENCE_LENGTH,
-            cluster,
-            task_set="fast",
-            eval_interval=1000,
-        )
+        # .with_callback(
+        #     "lm_evaluator",
+        #     LMEvaluatorCallbackConfig(
+        #         eval_dataset=NumpyDatasetConfig(
+        #             paths=EVAL_DATA_PATHS,
+        #             name=NumpyDatasetType.padded_fsl,
+        #             metadata=[{"label": path} for path in EVAL_DATA_PATHS],
+        #             sequence_length=SEQUENCE_LENGTH,
+        #             tokenizer=common.tokenizer,
+        #             work_dir=DATA_WORK_DIR,
+        #         ),
+        #         eval_interval=250,
+        #         eval_duration=Duration.steps(50),
+        #     ),
+        # )
     )
 
 
@@ -282,11 +279,30 @@ def build_config(
     if finalize_config is not None:
         finalize_config(config)
 
-    if not trainer.maybe_load_checkpoint(checkpoint):
-        log.info(f"Initializing model from checkpoint: {checkpoint}")
-        config.train_module.load_checkpoint = checkpoint
-
     return config
+
+
+def train(config: ExperimentConfig, checkpoint: str):
+    # Set RNG states on all devices.
+    seed_all(config.init_seed)
+
+    # Build components.
+    model = config.model.build(init_device="meta")
+    train_module = config.train_module.build(model)
+    dataset = config.dataset.build()
+    data_loader = config.data_loader.build(
+        dataset, dp_process_group=train_module.dp_process_group
+    )
+    trainer = config.trainer.build(train_module, data_loader)
+
+    trainer.load_checkpoint(checkpoint, load_trainer_state=False)
+
+    # Record the config to W&B/Comet and each checkpoint dir.
+    config_dict = config.as_config_dict()
+    cast(ConfigSaverCallback, trainer.callbacks["config_saver"]).config = config_dict
+
+    # Train.
+    trainer.fit()
 
 
 def main(
@@ -325,7 +341,7 @@ $ [i]python {sys.argv[0]} launch run01 gs://ai2-llm/checkpoints/peteish32/step41
 """.strip()
 
     # Parse command line arguments.
-    if len(sys.argv) < 5 or sys.argv[1] not in ("launch", "train", "dry_run"):
+    if len(sys.argv) < 5 or sys.argv[1] not in set(SubCmd):
         rich.get_console().print(USAGE, highlight=False)
         sys.exit(1)
 
@@ -359,8 +375,50 @@ $ [i]python {sys.argv[0]} launch run01 gs://ai2-llm/checkpoints/peteish32/step41
     )
 
     cmd.prepare_environment(config)
-    config.trainer.load_checkpoint(checkpoint, load_trainer_state=False)
+
     cmd.run(config)
+
+    # need to move these out of SubCmd to use our custom train method
+    if get_local_rank() == 0:
+        print(config)
+        print(
+            "\n"
+            f"[b blue]Total parameters:[/]         {config.model.num_params:,d} ({config.model.num_active_params:,d} active)\n"
+            f"[b blue]Non-embedding parameters:[/] {config.model.num_non_embedding_params:,d} ({config.model.num_active_non_embedding_params:,d} active)"
+        )
+
+    if cmd == SubCmd.launch:
+        launch(config)
+    elif cmd == SubCmd.dry_run:
+        pass
+    elif cmd == SubCmd.train:
+        try:
+            train(config, checkpoint)
+        finally:
+            teardown_training_environment()
+    elif cmd == SubCmd.train_single:
+        if config.train_module.dp_config is not None:
+            log.warning(
+                "'dp_config' is set to %s, but you can't use data parallelism when running on a single node. Disabling.",
+                config.train_module.dp_config,
+            )
+            config.train_module.dp_config = None
+        if config.train_module.tp_config is not None:
+            log.warning(
+                "'tp_config' is set to %s, but you can't use tensor parallelism when running on a single node. Disabling.",
+                config.train_module.dp_config,
+            )
+            config.train_module.tp_config = None
+        try:
+            train(config, checkpoint)
+        finally:
+            teardown_training_environment()
+    elif cmd == SubCmd.prep:
+        prep(config)
+    elif cmd == SubCmd.launch_prep:
+        launch_prep(config)
+    else:
+        raise NotImplementedError(cmd)
 
 
 if __name__ == "__main__":
@@ -371,6 +429,6 @@ if __name__ == "__main__":
         train_module_config_builder=build_train_module_config,
         trainer_config_builder=build_trainer_config,
         include_instance_filter=False,
-        include_default_evals=False,
+        include_default_evals=False,  # Can't use default evals on Greene
         intra_document_masking=False,
     )

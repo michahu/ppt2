@@ -8,6 +8,7 @@ from typing import Callable, List, Optional, cast
 import rich
 from olmo_core.config import Config, DType
 from olmo_core.data import (
+    DataMix,
     NumpyDataLoaderConfig,
     NumpyDatasetConfig,
     NumpyDatasetType,
@@ -76,7 +77,7 @@ def _read_data_mix_file(filename: str) -> List[str]:
 
 DATA_PATHS = _read_data_mix_file("OLMo-mix-0625-150Bsample.txt")
 EVAL_DATA_PATHS = _read_data_mix_file("v3-small-ppl-validation.txt")
-DATA_WORK_DIR = "scratch/myh2014/ppt2/data/"
+DATA_WORK_DIR = "./data/"
 
 log = logging.getLogger(__name__)
 
@@ -208,21 +209,20 @@ def build_trainer_config(common: CommonComponents) -> TrainerConfig:
                 cancel_check_interval=cancel_check_interval,
             ),
         )
-        # .with_callback(
-        #     "lm_evaluator",
-        #     LMEvaluatorCallbackConfig(
-        #         eval_dataset=NumpyDatasetConfig(
-        #             paths=EVAL_DATA_PATHS,
-        #             name=NumpyDatasetType.padded_fsl,
-        #             metadata=[{"label": path} for path in EVAL_DATA_PATHS],
-        #             sequence_length=SEQUENCE_LENGTH,
-        #             tokenizer=common.tokenizer,
-        #             work_dir=DATA_WORK_DIR,
-        #         ),
-        #         eval_interval=250,
-        #         eval_duration=Duration.steps(50),
-        #     ),
-        # )
+        .with_callback(
+            "lm_evaluator",
+            LMEvaluatorCallbackConfig(
+                eval_dataset=NumpyDatasetConfig.from_data_mix(
+                    DataMix.v3_small_ppl_validation,
+                    name=NumpyDatasetType.padded_fsl,
+                    mix_base_dir=DATA_ROOT,
+                    sequence_length=SEQUENCE_LENGTH,
+                    tokenizer=common.tokenizer,
+                    work_dir=DATA_WORK_DIR,
+                ),
+                eval_interval=500,
+            ),
+        )
     )
 
 

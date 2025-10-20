@@ -1,5 +1,5 @@
 """
-Train a 1B OLMo model. Run this script without any arguments to see usage info.
+Train a 190M or 1B OLMo model. Run this script without any arguments to see usage info.
 """
 
 import logging
@@ -21,7 +21,6 @@ from olmo_core.internal.experiment import (
     CommonComponents,
     SubCmd,
     build_common_components,
-    main,
 )
 from olmo_core.launch.beaker import BeakerLaunchConfig, OLMoCoreBeakerImage
 from olmo_core.nn.attention import SlidingWindowAttentionConfig
@@ -45,12 +44,11 @@ from olmo_core.train.train_module import (
 SEQUENCE_LENGTH = 2048
 GLOBAL_BATCH_SIZE = 32 * SEQUENCE_LENGTH
 WARMUP_STEPS = 1000
-N_TOKENS = 500 * GLOBAL_BATCH_SIZE  # 35M tokens
+N_TOKENS = 1000 * GLOBAL_BATCH_SIZE
 # === willm: original values ===
 # SEQUENCE_LENGTH = 8 * 1024
 # GLOBAL_BATCH_SIZE = 4 * 1024 * 1024
 # WARMUP_STEPS = 2000
-
 
 DATA_ROOT = "/vast/myh2014/data".rstrip("/")
 DATA_PATHS = [
@@ -73,11 +71,22 @@ class ExperimentConfig(Config):
     init_seed: int = 12536
 
 
-def build_model_config(common: CommonComponents) -> TransformerConfig:
-    config = TransformerConfig.olmo2_1B_v2(
-        vocab_size=common.tokenizer.padded_vocab_size(),
-        dtype=DType.bfloat16,
-    )
+def build_model_config(
+    common: CommonComponents, model_size: str = "1B"
+) -> TransformerConfig:
+    if model_size == "190M":
+        config = TransformerConfig.olmo2_190M(
+            vocab_size=common.tokenizer.padded_vocab_size(),
+            dtype=DType.bfloat16,
+        )
+    elif model_size == "1B":
+        config = TransformerConfig.olmo2_1B_v2(
+            vocab_size=common.tokenizer.padded_vocab_size(),
+            dtype=DType.bfloat16,
+        )
+    else:
+        raise ValueError(f"Invalid model size: {model_size}. Must be '190M' or '1B'")
+
     config.block.attention.sliding_window = SlidingWindowAttentionConfig(
         force_full_attention_on_first_layer=False,
         force_full_attention_on_last_layer=True,
@@ -117,18 +126,29 @@ def _set_beaker_execution_units(config: ExperimentConfig):
             )
 
 
-def build_train_module_config(common: CommonComponents) -> TransformerTrainModuleConfig:
+def build_train_module_config(
+    common: CommonComponents, model_size: str = "1B"
+) -> TransformerTrainModuleConfig:
     rank_microbatch_size = 4 * SEQUENCE_LENGTH
     if common.launch is not None:
         gpus = {CLUSTER_TO_GPU_TYPE.get(c, "unknown") for c in common.launch.clusters}
         if all("B200" in g for g in gpus):
             rank_microbatch_size *= 2
 
+    # Set learning rate based on model size
+    # For 190M: use higher LR (4e-3), for 1B: use standard LR (8e-4)
+    if model_size == "190M":
+        learning_rate = 4e-3
+    elif model_size == "1B":
+        learning_rate = 4e-4 * 2  # 8e-4
+    else:
+        raise ValueError(f"Invalid model size: {model_size}. Must be '190M' or '1B'")
+
     return TransformerTrainModuleConfig(
         rank_microbatch_size=rank_microbatch_size,
         max_sequence_length=common.dataset.effective_sequence_length,
         optim=SkipStepAdamWConfig(
-            lr=4e-4 * 2,
+            lr=learning_rate,
             weight_decay=0.033,
             betas=(0.9, 0.95),
             group_overrides=[
@@ -164,9 +184,7 @@ def build_trainer_config(common: CommonComponents) -> TrainerConfig:
             save_overwrite=True,
             metrics_collect_interval=10,
             cancel_check_interval=cancel_check_interval,
-            max_duration=Duration.tokens(
-                int(10 * N_TOKENS)
-            ),  # willm: 1 * N_TOKENS is original
+            max_duration=Duration.tokens(N_TOKENS),
             hard_stop=Duration.tokens(
                 int(2.5e12 + GLOBAL_BATCH_SIZE * (WARMUP_STEPS / 2))
             ),  # After this, we switch to a longer cosine to reach 6T.
@@ -201,17 +219,18 @@ def build_config(
     overrides: List[str],
     *,
     common_config_builder: Callable[..., CommonComponents] = build_common_components,
-    model_config_builder: Callable[[CommonComponents], TransformerConfig],
+    model_config_builder: Callable[[CommonComponents, str], TransformerConfig],
     train_module_config_builder: Callable[
-        [CommonComponents], TransformerTrainModuleConfig
+        [CommonComponents, str], TransformerTrainModuleConfig
     ],
     trainer_config_builder: Callable[[CommonComponents], TrainerConfig],
     finalize_config: Optional[Callable[[ExperimentConfig], None]] = None,
+    model_size: str = "1B",
     **kwargs,
 ) -> ExperimentConfig:
     common = common_config_builder(script, cmd, run_name, cluster, overrides, **kwargs)
 
-    model = model_config_builder(common)
+    model = model_config_builder(common, model_size)
 
     dataset = NumpyDatasetConfig(
         # @willm might be called data_paths
@@ -234,7 +253,7 @@ def build_config(
         model=model,
         dataset=dataset,
         data_loader=common.data_loader,
-        train_module=train_module_config_builder(common),
+        train_module=train_module_config_builder(common, model_size),
         trainer=trainer,
     )
 
@@ -252,9 +271,9 @@ def main(
     *,
     global_batch_size: int,
     common_config_builder: Callable[..., CommonComponents] = build_common_components,
-    model_config_builder: Callable[[CommonComponents], TransformerConfig],
+    model_config_builder: Callable[[CommonComponents, str], TransformerConfig],
     train_module_config_builder: Callable[
-        [CommonComponents], TransformerTrainModuleConfig
+        [CommonComponents, str], TransformerTrainModuleConfig
     ],
     trainer_config_builder: Callable[[CommonComponents], TrainerConfig],
     finalize_config: Optional[Callable[[ExperimentConfig], None]] = None,
@@ -265,11 +284,9 @@ def main(
     beaker_image: str = OLMoCoreBeakerImage.stable,
     num_nodes: int = 1,
     beaker_workspace: str = "ai2/OLMo-core",
-    use_hostname_constraints: bool = False,
-    num_execution_units: Optional[int] = None,
 ):
     usage = f"""
-[yellow]Usage:[/] [i blue]python[/] [i cyan]{sys.argv[0]}[/] [i b magenta]{"|".join(SubCmd)}[/] [i b]RUN_NAME CLUSTER[/] [i][OVERRIDES...][/]
+[yellow]Usage:[/] [i blue]python[/] [i cyan]{sys.argv[0]}[/] [i b magenta]{"|".join(SubCmd)}[/] [i b]RUN_NAME CLUSTER [MODEL_SIZE][/] [i][OVERRIDES...][/]
 
 [b]Subcommands[/]
 [b magenta]launch:[/]      Launch the script on Beaker with the [b magenta]train[/] subcommand.
@@ -280,17 +297,40 @@ def main(
 [b magenta]launch_prep:[/] Launch the script on Beaker with the [b magenta]prep[/] subcommand.
 [b magenta]dry_run:[/]     Pretty print the config and exit.
 
+[b]Model Size[/]
+Optional positional argument after CLUSTER. Must be "190M" or "1B" (default: "1B")
+
 [b]Examples[/]
+$ [i]python {sys.argv[0]} {SubCmd.launch} run01 ai2/pluto-cirrascale 190M --launch.num_nodes=2[/]
 $ [i]python {sys.argv[0]} {SubCmd.launch} run01 ai2/pluto-cirrascale --launch.num_nodes=2[/]
     """.strip()
 
+    # Parse command line arguments.
     if len(sys.argv) < 4 or sys.argv[1] not in set(SubCmd):
         import rich
 
         rich.get_console().print(usage, highlight=False)
         sys.exit(1)
 
-    script, cmd, run_name, cluster, *overrides = sys.argv
+    script, cmd, run_name, cluster, *rest = sys.argv
+
+    # Check if model_size is provided (doesn't start with --)
+    model_size = "1B"  # default
+    overrides = []
+    if rest and not rest[0].startswith("--"):
+        model_size_arg = rest[0]
+        if model_size_arg not in ["190M", "1B"]:
+            import rich
+
+            rich.get_console().print(
+                f"[red]Error:[/] Invalid model size '{model_size_arg}'. Must be '190M' or '1B'.",
+                highlight=False,
+            )
+            sys.exit(1)
+        model_size = model_size_arg
+        overrides = rest[1:]
+    else:
+        overrides = rest
 
     cmd = SubCmd(cmd)
 
@@ -313,9 +353,7 @@ $ [i]python {sys.argv[0]} {SubCmd.launch} run01 ai2/pluto-cirrascale --launch.nu
         beaker_image=beaker_image,
         num_nodes=num_nodes,
         beaker_workspace=beaker_workspace,
-        # myhu: @willm you might need to uncomment these
-        # use_hostname_constraints=use_hostname_constraints,
-        # num_execution_units=num_execution_units,
+        model_size=model_size,
     )
 
     cmd.prepare_environment(config)

@@ -48,7 +48,7 @@ from olmo_core.train.train_module import (
 from olmo_core.utils import seed_all
 
 SEQUENCE_LENGTH = 2048
-GLOBAL_BATCH_SIZE = 32 * SEQUENCE_LENGTH
+GLOBAL_BATCH_SIZE = 256 * SEQUENCE_LENGTH
 WARMUP_STEPS = 1000
 N_TOKENS = 30_000 * GLOBAL_BATCH_SIZE
 
@@ -94,11 +94,22 @@ class ExperimentConfig(Config):
     init_seed: int = 12536
 
 
-def build_model_config(common: CommonComponents) -> TransformerConfig:
-    config = TransformerConfig.olmo2_1B_v2(
-        vocab_size=common.tokenizer.padded_vocab_size(),
-        dtype=DType.bfloat16,
-    )
+def build_model_config(
+    common: CommonComponents, model_size: str = "190M"
+) -> TransformerConfig:
+    if model_size == "190M":
+        config = TransformerConfig.olmo2_190M(
+            vocab_size=common.tokenizer.padded_vocab_size(),
+            dtype=DType.bfloat16,
+        )
+    elif model_size == "1B":
+        config = TransformerConfig.olmo2_1B_v2(
+            vocab_size=common.tokenizer.padded_vocab_size(),
+            dtype=DType.bfloat16,
+        )
+    else:
+        raise ValueError(f"Invalid model size: {model_size}. Must be '190M' or '1B'")
+
     config.block.attention.sliding_window = SlidingWindowAttentionConfig(
         force_full_attention_on_first_layer=False,
         force_full_attention_on_last_layer=True,
@@ -138,18 +149,30 @@ def _set_beaker_execution_units(config: ExperimentConfig):
             )
 
 
-def build_train_module_config(common: CommonComponents) -> TransformerTrainModuleConfig:
-    rank_microbatch_size = 4 * SEQUENCE_LENGTH
+def build_train_module_config(
+    common: CommonComponents, model_size: str = "190M"
+) -> TransformerTrainModuleConfig:
+    rank_microbatch_size = 8 * SEQUENCE_LENGTH
     if common.launch is not None:
         gpus = {CLUSTER_TO_GPU_TYPE.get(c, "unknown") for c in common.launch.clusters}
         if all("B200" in g for g in gpus):
             rank_microbatch_size *= 2
 
+    # Set learning rate based on model size
+    # For 190M: use higher LR (4e-3), for 1B: use standard LR (8e-4)
+    if model_size == "190M":
+        learning_rate = 4e-3
+        rank_microbatch_size *= 4
+    elif model_size == "1B":
+        learning_rate = 4e-4 * 2  # 8e-4
+    else:
+        raise ValueError(f"Invalid model size: {model_size}. Must be '190M' or '1B'")
+
     return TransformerTrainModuleConfig(
         rank_microbatch_size=rank_microbatch_size,
         max_sequence_length=common.dataset.effective_sequence_length,
         optim=SkipStepAdamWConfig(
-            lr=4e-4 * 2,
+            lr=learning_rate,
             weight_decay=0.033,
             betas=(0.9, 0.95),
             group_overrides=[
@@ -231,21 +254,22 @@ def build_config(
     cmd: SubCmd,
     run_name: str,
     cluster: str,
-    checkpoint: str,
+    checkpoint: Optional[str],
     overrides: List[str],
     *,
     common_config_builder: Callable[..., CommonComponents] = build_common_components,
-    model_config_builder: Callable[[CommonComponents], TransformerConfig],
+    model_config_builder: Callable[[CommonComponents, str], TransformerConfig],
     train_module_config_builder: Callable[
-        [CommonComponents], TransformerTrainModuleConfig
+        [CommonComponents, str], TransformerTrainModuleConfig
     ],
     trainer_config_builder: Callable[[CommonComponents], TrainerConfig],
     finalize_config: Optional[Callable[[ExperimentConfig], None]] = None,
+    model_size: str = "190M",
     **kwargs,
 ) -> ExperimentConfig:
     common = common_config_builder(script, cmd, run_name, cluster, overrides, **kwargs)
 
-    model = model_config_builder(common)
+    model = model_config_builder(common, model_size)
 
     dataset = NumpyDatasetConfig(
         # @willm might be called data_paths
@@ -268,7 +292,7 @@ def build_config(
         model=model,
         dataset=dataset,
         data_loader=common.data_loader,
-        train_module=train_module_config_builder(common),
+        train_module=train_module_config_builder(common, model_size),
         trainer=trainer,
     )
 
@@ -282,7 +306,7 @@ def build_config(
     return config
 
 
-def train(config: ExperimentConfig, checkpoint: str):
+def train(config: ExperimentConfig, checkpoint: Optional[str]):
     # Set RNG states on all devices.
     seed_all(config.init_seed)
 
@@ -295,7 +319,8 @@ def train(config: ExperimentConfig, checkpoint: str):
     )
     trainer = config.trainer.build(train_module, data_loader)
 
-    trainer.load_checkpoint(checkpoint, load_trainer_state=False)
+    if checkpoint is not None:
+        trainer.load_checkpoint(checkpoint, load_trainer_state=False)
 
     # Record the config to W&B/Comet and each checkpoint dir.
     config_dict = config.as_config_dict()
@@ -309,9 +334,9 @@ def main(
     *,
     global_batch_size: int,
     common_config_builder: Callable[..., CommonComponents] = build_common_components,
-    model_config_builder: Callable[[CommonComponents], TransformerConfig],
+    model_config_builder: Callable[[CommonComponents, str], TransformerConfig],
     train_module_config_builder: Callable[
-        [CommonComponents], TransformerTrainModuleConfig
+        [CommonComponents, str], TransformerTrainModuleConfig
     ],
     trainer_config_builder: Callable[[CommonComponents], TrainerConfig],
     finalize_config: Optional[Callable[[ExperimentConfig], None]] = None,
@@ -328,7 +353,7 @@ def main(
     USAGE = f"""
 PPT Phase 1.
 
-[yellow]Usage:[/] [i blue]python[/] [i cyan]{sys.argv[0]}[/] [i b magenta]launch|train|dry_run[/] [i b]RUN_NAME PRETRAIN_CHECKPOINT CLUSTER[/] [i][OVERRIDES...][/]
+[yellow]Usage:[/] [i blue]python[/] [i cyan]{sys.argv[0]}[/] [i b magenta]launch|train|dry_run[/] [i b]RUN_NAME CLUSTER [MODEL_SIZE] [PRETRAIN_CHECKPOINT][/] [i][OVERRIDES...][/]
 
 [b]Subcommands[/]
 [b magenta]launch:[/]      Launch the script on Beaker with the [b magenta]train[/] subcommand.
@@ -336,16 +361,39 @@ PPT Phase 1.
              Instead use the [b magenta]launch[/] cmd to submit it to Beaker or run it via torchrun if you know what you're doing.
 [b magenta]dry_run:[/]     Print the config for debugging.
 
+[b]Model Size[/]
+Optional positional argument after CLUSTER. Must be "190M" or "1B" (default: "190M")
+
 [b]Examples[/]
-$ [i]python {sys.argv[0]} launch run01 gs://ai2-llm/checkpoints/peteish32/step419000 ai2/jupiter-cirrascale-2 --launch.num_nodes=2[/]
+$ [i]python {sys.argv[0]} launch run01 ai2/jupiter-cirrascale-2 190M gs://ai2-llm/checkpoints/peteish32/step419000 --launch.num_nodes=2[/]
+$ [i]python {sys.argv[0]} launch run01 ai2/jupiter-cirrascale-2 1B --launch.num_nodes=2[/]
+$ [i]python {sys.argv[0]} launch run02 ai2/jupiter-cirrascale-2 --launch.num_nodes=2[/]
 """.strip()
 
     # Parse command line arguments.
-    if len(sys.argv) < 5 or sys.argv[1] not in set(SubCmd):
+    if len(sys.argv) < 4 or sys.argv[1] not in set(SubCmd):
         rich.get_console().print(USAGE, highlight=False)
         sys.exit(1)
 
-    script, cmd, run_name, checkpoint, cluster, *overrides = sys.argv
+    script, cmd, run_name, cluster, *rest = sys.argv
+
+    # Parse optional model_size and checkpoint arguments
+    model_size = "190M"  # default
+    checkpoint = None
+    overrides = []
+
+    if rest:
+        # Check if first arg is model_size (190M or 1B)
+        if rest[0] in ["190M", "1B"]:
+            model_size = rest[0]
+            rest = rest[1:]
+
+        # Check if next arg is checkpoint (doesn't start with --)
+        if rest and not rest[0].startswith("--"):
+            checkpoint = rest[0]
+            overrides = rest[1:]
+        else:
+            overrides = rest
 
     cmd = SubCmd(cmd)
 
@@ -369,14 +417,13 @@ $ [i]python {sys.argv[0]} launch run01 gs://ai2-llm/checkpoints/peteish32/step41
         beaker_image=beaker_image,
         num_nodes=num_nodes,
         beaker_workspace=beaker_workspace,
+        model_size=model_size,
         # myhu: @willm you might need to uncomment these
         # use_hostname_constraints=use_hostname_constraints,
         # num_execution_units=num_execution_units,
     )
 
     cmd.prepare_environment(config)
-
-    cmd.run(config)
 
     # need to move these out of SubCmd to use our custom train method
     if get_local_rank() == 0:

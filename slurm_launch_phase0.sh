@@ -2,16 +2,14 @@
 #SBATCH --job-name=ppt2-phase0
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:1
-#SBATCH --mem=32GB
-#SBATCH --time=24:00:00
-#SBATCH --partition=gpu
+#SBATCH --gres=gpu:1 -C "a100|h100"
+#SBATCH --mem=64GB
+#SBATCH --time=48:00:00
 
 # Parse command line arguments
 RUN_NAME=${1:-"run01"}
+MODEL_SIZE=${2:-"1B"}
 
 # Slurm sets the node name automatically
 NODE_NAME=$(hostname)
@@ -24,6 +22,7 @@ echo "Starting job on $(hostname) at $(date)"
 echo "Job ID: $SLURM_JOB_ID"
 echo "Node name: $NODE_NAME"
 echo "Run name: $RUN_NAME"
+echo "Model size: $MODEL_SIZE"
 echo "GPU devices: $CUDA_VISIBLE_DEVICES"
 
 # Load modules (adjust based on your cluster setup)
@@ -49,9 +48,10 @@ echo "Python version: $(python --version)"
 echo "CUDA visible devices: $CUDA_VISIBLE_DEVICES"
 echo "Working directory: $(pwd)"
 
-# Run the training script with the same arguments as in README
-echo "Running: python ./scripts/phase0_nyu.py train_single $RUN_NAME $NODE_NAME"
-python ./scripts/phase0_nyu.py train_single "$RUN_NAME" "$NODE_NAME"
+# Run the training script with model_size argument
+# Arguments order: train_single RUN_NAME NODE_NAME [MODEL_SIZE]
+echo "Running: python ./scripts/phase0_nyu.py train_single $RUN_NAME $NODE_NAME $MODEL_SIZE"
+python ./scripts/phase0_nyu.py train_single "$RUN_NAME" "$NODE_NAME" "$MODEL_SIZE"
 
 # Print completion info
 echo "Job completed at $(date)"

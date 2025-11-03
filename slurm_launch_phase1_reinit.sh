@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ppt2-phase1
+#SBATCH --job-name=ppt2-phase1-reinit
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
 #SBATCH --cpus-per-task=4
@@ -11,6 +11,10 @@
 RUN_NAME=${1:-"run01"}
 MODEL_SIZE=${2:-"190M"}
 CHECKPOINT=${3:-""}
+FIRST_K=${4:-2}
+METHOD=${5:-"orthogonal"}
+shift 5
+LAYERS="$@"  # All remaining arguments are layer indices
 
 # Slurm sets the node name automatically
 NODE_NAME=$(hostname)
@@ -29,6 +33,9 @@ if [ -n "$CHECKPOINT" ]; then
 else
     echo "Checkpoint: (none - training from scratch)"
 fi
+echo "First k heads: $FIRST_K"
+echo "Reinit method: $METHOD"
+echo "Layers to reinitialize: $LAYERS"
 echo "GPU devices: $CUDA_VISIBLE_DEVICES"
 
 # Load modules (adjust based on your cluster setup)
@@ -54,24 +61,17 @@ echo "Python version: $(python --version)"
 echo "CUDA visible devices: $CUDA_VISIBLE_DEVICES"
 echo "Working directory: $(pwd)"
 
-# Run the training script with the new model_size argument
-# Arguments order: train_single RUN_NAME NODE_NAME [MODEL_SIZE] [CHECKPOINT]
+# Run the training script with reinitialization
+# Arguments order: train_single RUN_NAME NODE_NAME [MODEL_SIZE] [CHECKPOINT] --first_k K --method M --layers L1 [L2 ...]
 if [ -n "$CHECKPOINT" ]; then
-    echo "Running: python ./scripts/phase1_nyu_wd_ablation.py train_single $RUN_NAME $NODE_NAME $MODEL_SIZE $CHECKPOINT"
-    python ./scripts/phase1_nyu_wd_ablation.py train_single "$RUN_NAME" "$NODE_NAME" "$MODEL_SIZE" "$CHECKPOINT"
+    echo "Running: python ./scripts/phase1_reinit.py train_single $RUN_NAME $NODE_NAME $MODEL_SIZE $CHECKPOINT --first_k $FIRST_K --method $METHOD --layers $LAYERS"
+    python ./scripts/phase1_reinit.py train_single "$RUN_NAME" "$NODE_NAME" "$MODEL_SIZE" "$CHECKPOINT" --first_k "$FIRST_K" --method "$METHOD" --layers $LAYERS
 else
-    echo "Running: python ./scripts/phase1_nyu_wd_ablation.py train_single $RUN_NAME $NODE_NAME $MODEL_SIZE"
-    python ./scripts/phase1_nyu_wd_ablation.py train_single "$RUN_NAME" "$NODE_NAME" "$MODEL_SIZE"
+    echo "Running: python ./scripts/phase1_reinit.py train_single $RUN_NAME $NODE_NAME $MODEL_SIZE --first_k $FIRST_K --method $METHOD --layers $LAYERS"
+    python ./scripts/phase1_reinit.py train_single "$RUN_NAME" "$NODE_NAME" "$MODEL_SIZE" --first_k "$FIRST_K" --method "$METHOD" --layers $LAYERS
 fi
-
-# if [ -n "$CHECKPOINT" ]; then
-#     echo "Running: python ./scripts/phase1_nyu_data_constrained.py train_single $RUN_NAME $NODE_NAME $MODEL_SIZE $CHECKPOINT"
-#     python ./scripts/phase1_nyu_data_constrained.py train_single "$RUN_NAME" "$NODE_NAME" "$MODEL_SIZE" "$CHECKPOINT"
-# else
-#     echo "Running: python ./scripts/phase1_nyu_data_constrained.py train_single $RUN_NAME $NODE_NAME $MODEL_SIZE"
-#     python ./scripts/phase1_nyu_data_constrained.py train_single "$RUN_NAME" "$NODE_NAME" "$MODEL_SIZE"
-# fi
 
 # Print completion info
 echo "Job completed at $(date)"
 echo "Exit code: $?"
+

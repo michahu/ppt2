@@ -117,8 +117,8 @@ def _reinit_qk_mutually_orthogonal(
     head_slice = slice(0, d_k)
 
     # Create a full orthogonal matrix (d_model x d_model)
-    # Handle bfloat16 on CPU
-    if original_dtype == torch.bfloat16 and device.type == "cpu":
+    # Handle bfloat16 (QR decomposition doesn't support it on CPU or CUDA)
+    if original_dtype == torch.bfloat16:
         full_matrix = torch.empty(d_model, d_model, dtype=torch.float32, device=device)
     else:
         full_matrix = torch.empty(d_model, d_model, dtype=original_dtype, device=device)
@@ -132,7 +132,7 @@ def _reinit_qk_mutually_orthogonal(
     K = full_matrix[:, d_k : 2 * d_k].T.clone()  # Shape: [d_k, d_model]
 
     # Convert back to original dtype if necessary
-    if original_dtype == torch.bfloat16 and device.type == "cpu":
+    if original_dtype == torch.bfloat16:
         Q = Q.to(original_dtype)
         K = K.to(original_dtype)
 
@@ -145,6 +145,100 @@ def _reinit_qk_mutually_orthogonal(
         q_proj.bias.data[head_slice].zero_()
     if k_proj.bias is not None:
         k_proj.bias.data[head_slice].zero_()
+
+
+def reinit_qk_scale(
+    model: nn.Module,
+    config,
+    first_k: int,
+    layers: Union[List[int], int],
+    init_scale: float = 1.0,
+) -> None:
+    """
+    Scale the first k attention heads' K and Q projection matrices by a constant factor (in-place).
+
+    Args:
+        model: OLMo transformer model
+        config: TransformerConfig object with n_heads and d_model attributes
+        first_k: Number of attention heads to scale (the first k heads)
+        layers: Layer indices to apply scaling to. Can be a single int or list of ints.
+        init_scale: Scaling factor to multiply the weights by
+
+    Assumes OLMo architecture:
+        - model.transformer.blocks[layer_idx].attention.{w_q, w_k} or model.blocks[layer_idx].attention.{w_q, w_k}
+        - config with n_heads and d_model attributes
+    """
+    # Normalize layers to a list
+    if isinstance(layers, int):
+        layers = [layers]
+
+    # Get architecture parameters from config
+    n_heads = config.block.attention.n_heads
+    d_model = config.d_model
+    head_dim = d_model // n_heads
+
+    if first_k > n_heads:
+        raise ValueError(
+            f"first_k ({first_k}) cannot be greater than n_heads ({n_heads})"
+        )
+
+    # Access transformer blocks
+    if hasattr(model, "transformer") and hasattr(model.transformer, "blocks"):
+        blocks = model.transformer.blocks
+    elif hasattr(model, "blocks"):
+        blocks = model.blocks
+    else:
+        raise ValueError(
+            "Could not find transformer blocks. Expected model.transformer.blocks or model.blocks"
+        )
+
+    for layer_idx in layers:
+        if layer_idx < 0 or layer_idx >= len(blocks):
+            raise ValueError(f"Layer index {layer_idx} out of range [0, {len(blocks)})")
+
+        block = blocks[f"{layer_idx}"]
+        attn = block.attention
+
+        # OLMo uses w_q and w_k (not q_proj/k_proj)
+        if not (hasattr(attn, "w_q") and hasattr(attn, "w_k")):
+            raise ValueError(
+                f"Could not find w_q and w_k in layer {layer_idx}. "
+                f"Available attributes: {dir(attn)}"
+            )
+
+        # Scale Q and K projections for the first k heads
+        _scale_projection(attn.w_q, first_k, head_dim, init_scale)
+        _scale_projection(attn.w_k, first_k, head_dim, init_scale)
+
+        print(
+            f"Scaled first {first_k} heads in layer {layer_idx} by factor {init_scale}"
+        )
+
+
+def _scale_projection(
+    proj: nn.Linear, first_k_heads: int, head_dim: int, scale: float
+) -> None:
+    """
+    Scale the first k heads of a projection matrix by a constant factor (in-place).
+
+    Args:
+        proj: Linear projection layer (w_q or w_k)
+        first_k_heads: Number of heads to scale
+        head_dim: Dimension of each attention head
+        scale: Scaling factor
+    """
+    weight = proj.weight.data
+
+    # Scale the first k heads
+    # Each head's parameters span head_dim rows
+    head_slice = slice(0, first_k_heads * head_dim)
+
+    # Multiply weights by scale factor
+    weight[head_slice].mul_(scale)
+
+    # Also scale bias if it exists (though OLMo typically uses bias=False)
+    if proj.bias is not None:
+        proj.bias.data[head_slice].mul_(scale)
 
 
 def reinit_qk_zeros(

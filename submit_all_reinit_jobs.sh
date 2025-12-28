@@ -3,21 +3,23 @@
 # Script to submit reinitialization jobs - single job or batch of 12 jobs
 # 
 # Usage for batch (all 12 jobs):
-#   ./submit_all_reinit_jobs.sh all [base_run_name] [model_size] [checkpoint] [first_k] [method]
+#   ./submit_all_reinit_jobs.sh all [base_run_name] [model_size] [checkpoint] [first_k] [method] [init_scale]
 # 
 # Usage for single job:
-#   ./submit_all_reinit_jobs.sh [run_name] [model_size] [checkpoint] [first_k] [method] [layers...]
+#   ./submit_all_reinit_jobs.sh [run_name] [model_size] [checkpoint] [first_k] [method] [init_scale] [layers...]
 # 
 # Examples:
 #   # Submit all 12 jobs
-#   ./submit_all_reinit_jobs.sh all reinit_sweep 190M "" 2 orthogonal
-#   ./submit_all_reinit_jobs.sh all reinit_sweep 190M "" 2 zeros
-#   ./submit_all_reinit_jobs.sh all reinit_sweep 190M ./runs/baseline/step500 2 orthogonal
+#   ./submit_all_reinit_jobs.sh all reinit_sweep 190M "" 2 orthogonal 1.0
+#   ./submit_all_reinit_jobs.sh all reinit_sweep 190M "" 2 zeros 1.0
+#   ./submit_all_reinit_jobs.sh all reinit_sweep 190M "" 2 scale 0.5
+#   ./submit_all_reinit_jobs.sh all reinit_sweep 190M ./runs/baseline/step500 2 orthogonal 1.0
 #   
 #   # Submit single job
-#   ./submit_all_reinit_jobs.sh reinit_test 190M "" 2 orthogonal 0 1
-#   ./submit_all_reinit_jobs.sh reinit_test 190M "" 2 zeros 0 1 2 3
-#   ./submit_all_reinit_jobs.sh reinit_all 190M "" 4 zeros all
+#   ./submit_all_reinit_jobs.sh reinit_test 190M "" 2 orthogonal 1.0 0 1
+#   ./submit_all_reinit_jobs.sh reinit_test 190M "" 2 zeros 1.0 0 1 2 3
+#   ./submit_all_reinit_jobs.sh reinit_test 190M "" 2 scale 0.1 0 1 2 3
+#   ./submit_all_reinit_jobs.sh reinit_all 190M "" 4 zeros 1.0 all
 
 MODE=${1:-"all"}
 
@@ -29,6 +31,7 @@ if [ "$MODE" == "all" ]; then
     CHECKPOINT=${4:-""}
     FIRST_K=${5:-2}
     METHOD=${6:-"orthogonal"}
+    INIT_SCALE=${7:-1.0}
     
     echo "=========================================="
     echo "Submitting 12 Reinitialization Jobs"
@@ -42,6 +45,7 @@ if [ "$MODE" == "all" ]; then
     fi
     echo "First k heads: $FIRST_K"
     echo "Reinit method: $METHOD"
+    echo "Init scale: $INIT_SCALE"
     echo "=========================================="
     echo ""
     
@@ -64,9 +68,9 @@ if [ "$MODE" == "all" ]; then
         
         # Submit the job and capture the job ID
         if [ -n "$CHECKPOINT" ]; then
-            job_output=$(sbatch slurm_launch_phase1_reinit.sh "$RUN_NAME" "$MODEL_SIZE" "$CHECKPOINT" "$FIRST_K" "$METHOD" $layers)
+            job_output=$(sbatch slurm_launch_phase1_reinit.sh "$RUN_NAME" "$MODEL_SIZE" "$CHECKPOINT" "$FIRST_K" "$METHOD" "$INIT_SCALE" $layers)
         else
-            job_output=$(sbatch slurm_launch_phase1_reinit.sh "$RUN_NAME" "$MODEL_SIZE" "" "$FIRST_K" "$METHOD" $layers)
+            job_output=$(sbatch slurm_launch_phase1_reinit.sh "$RUN_NAME" "$MODEL_SIZE" "" "$FIRST_K" "$METHOD" "$INIT_SCALE" $layers)
         fi
         
         # Extract job ID from sbatch output (typically "Submitted batch job 12345")
@@ -97,7 +101,8 @@ else
     CHECKPOINT=${3:-""}
     FIRST_K=${4:-2}
     METHOD=${5:-"orthogonal"}
-    shift 5
+    INIT_SCALE=${6:-1.0}
+    shift 6
     LAYERS="$@"
     
     # Default to layers 0 1 if not specified
@@ -115,10 +120,11 @@ else
     fi
     echo "  First k heads: $FIRST_K"
     echo "  Reinit method: $METHOD"
+    echo "  Init scale: $INIT_SCALE"
     echo "  Layers to reinit: $LAYERS"
     
     # Submit the job
-    sbatch slurm_launch_phase1_reinit.sh "$RUN_NAME" "$MODEL_SIZE" "$CHECKPOINT" "$FIRST_K" "$METHOD" $LAYERS
+    sbatch slurm_launch_phase1_reinit.sh "$RUN_NAME" "$MODEL_SIZE" "$CHECKPOINT" "$FIRST_K" "$METHOD" "$INIT_SCALE" $LAYERS
     
     echo ""
     echo "Job submitted. Check status with: squeue -u $USER"

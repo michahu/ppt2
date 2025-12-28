@@ -12,6 +12,7 @@ from olmo_core.data import (
     NumpyDataLoaderConfig,
     NumpyDatasetConfig,
     NumpyDatasetType,
+    TokenizerConfig,
 )
 from olmo_core.distributed.parallel import DataParallelType
 from olmo_core.distributed.utils import get_local_rank
@@ -46,11 +47,14 @@ from olmo_core.train.train_module import (
     TransformerTrainModuleConfig,
 )
 from olmo_core.utils import seed_all
+from olmo_core.distributed.utils import get_rank, scatter_object
+from olmo_core.io import normalize_path
 
+USE_NOPE = True
 SEQUENCE_LENGTH = 2048
 GLOBAL_BATCH_SIZE = 256 * SEQUENCE_LENGTH
 WARMUP_STEPS = 1000
-N_TOKENS = 30_000 * GLOBAL_BATCH_SIZE
+N_TOKENS = 50_000 * GLOBAL_BATCH_SIZE
 
 DATA_ROOT = "/vast/myh2014/data".rstrip("/")
 
@@ -94,21 +98,56 @@ class ExperimentConfig(Config):
     init_seed: int = 12536
 
 
+def get_tokenizer_config() -> TokenizerConfig:
+    """
+    Get tokenizer config, optionally with BOS token for NoPE.
+
+    When using NoPE (No Positional Encoding), we need a BOS token at the start
+    of each sequence. We use the padded vocab size as the BOS token ID, which
+    means the model's vocab size needs to be increased by 1.
+    """
+    base_config = TokenizerConfig.dolma2()
+
+    if USE_NOPE:
+        # Use the padded vocab size as BOS token ID
+        # This requires increasing vocab_size by 1 in the model
+        padded_vocab = base_config.padded_vocab_size()
+        return TokenizerConfig(
+            vocab_size=base_config.vocab_size + 1,  # +1 for BOS token
+            eos_token_id=base_config.eos_token_id,
+            pad_token_id=base_config.pad_token_id,
+            bos_token_id=padded_vocab,  # BOS is at the padded vocab size index
+            identifier=base_config.identifier,
+        )
+    return base_config
+
+
 def build_model_config(
     common: CommonComponents, model_size: str = "190M"
 ) -> TransformerConfig:
+    # When using NoPE with BOS, we need vocab_size = padded_vocab_size + 1
+    # to accommodate the new BOS token
+    if USE_NOPE:
+        vocab_size = common.tokenizer.padded_vocab_size() + 1
+    else:
+        vocab_size = common.tokenizer.padded_vocab_size()
+
     if model_size == "190M":
         config = TransformerConfig.olmo2_190M(
-            vocab_size=common.tokenizer.padded_vocab_size(),
+            vocab_size=vocab_size,
             dtype=DType.bfloat16,
         )
     elif model_size == "1B":
         config = TransformerConfig.olmo2_1B_v2(
-            vocab_size=common.tokenizer.padded_vocab_size(),
+            vocab_size=vocab_size,
             dtype=DType.bfloat16,
         )
     else:
         raise ValueError(f"Invalid model size: {model_size}. Must be '190M' or '1B'")
+
+    # Disable RoPE for NoPE (No Positional Encoding)
+    if USE_NOPE:
+        config.block.attention.rope = None
 
     config.block.attention.sliding_window = SlidingWindowAttentionConfig(
         force_full_attention_on_first_layer=False,
@@ -216,7 +255,7 @@ def build_trainer_config(common: CommonComponents) -> TrainerConfig:
         .with_callback(
             "checkpointer",
             CheckpointerCallback(
-                save_interval=250,  # willm: 500 corresponds to original paper
+                save_interval=5000,
                 ephemeral_save_interval=None,
                 save_async=True,
             ),
@@ -226,8 +265,8 @@ def build_trainer_config(common: CommonComponents) -> TrainerConfig:
             WandBCallback(
                 name=run_name,
                 group=common.run_name,
-                # entity="ai2-llm",
-                # project="willm-ppt2",
+                entity="ai2-llm",
+                project="willm-ppt2",
                 enabled=True,
                 cancel_check_interval=cancel_check_interval,
             ),
@@ -243,7 +282,7 @@ def build_trainer_config(common: CommonComponents) -> TrainerConfig:
                     tokenizer=common.tokenizer,
                     work_dir=DATA_WORK_DIR,
                 ),
-                eval_interval=500,
+                eval_interval=5000,
             ),
         )
     )
@@ -265,9 +304,19 @@ def build_config(
     trainer_config_builder: Callable[[CommonComponents], TrainerConfig],
     finalize_config: Optional[Callable[[ExperimentConfig], None]] = None,
     model_size: str = "190M",
+    tokenizer: Optional[TokenizerConfig] = None,
+    init_seed: int = 12536,
     **kwargs,
 ) -> ExperimentConfig:
-    common = common_config_builder(script, cmd, run_name, cluster, overrides, **kwargs)
+    effective_tokenizer = tokenizer if tokenizer is not None else get_tokenizer_config()
+    common = common_config_builder(
+        script,
+        cmd,
+        run_name,
+        cluster,
+        overrides,
+        **kwargs,
+    )
 
     model = model_config_builder(common, model_size)
 
@@ -276,7 +325,7 @@ def build_config(
         paths=DATA_PATHS,
         name=NumpyDatasetType.fsl,
         work_dir=DATA_WORK_DIR,
-        tokenizer=common.tokenizer,
+        tokenizer=effective_tokenizer,
         sequence_length=SEQUENCE_LENGTH,
         max_target_sequence_length=8192,
     )
@@ -294,6 +343,7 @@ def build_config(
         data_loader=common.data_loader,
         train_module=train_module_config_builder(common, model_size),
         trainer=trainer,
+        init_seed=init_seed,
     )
 
     config = config.merge(overrides)
@@ -306,7 +356,149 @@ def build_config(
     return config
 
 
-def train(config: ExperimentConfig, checkpoint: Optional[str]):
+def load_checkpoint_with_options(
+    trainer,
+    dir,
+    *,
+    load_trainer_state: Optional[bool] = None,
+    load_optim_state: Optional[bool] = None,
+    load_embeddings: bool = True,
+    alpha: float = 1.0,
+):
+    """
+    Load a checkpoint with optional control over which components to load.
+
+    :param trainer: The Trainer instance.
+    :param dir: The path/URL to a checkpoint or a folder of checkpoints.
+    :param load_trainer_state: Load trainer state (data loader state, RNG states, and other bookkeeping).
+    :param load_optim_state: Load optimizer state in the train module.
+    :param load_embeddings: If False, skip loading embedding weights (useful for vocab changes).
+                           This handles mismatched embedding sizes.
+    :param alpha: Interpolation factor between checkpoint and current model weights.
+                  Final weights = alpha * checkpoint + (1 - alpha) * current_model.
+                  alpha=1.0 (default) means fully load checkpoint weights.
+                  alpha=0.0 means keep current model weights (no loading).
+    """
+    import torch
+    from torch.distributed.checkpoint.state_dict import (
+        set_model_state_dict,
+        get_model_state_dict,
+        StateDictOptions,
+    )
+    from torch.distributed import checkpoint as dist_cp
+    from olmo_core.distributed.checkpoint import (
+        get_checkpoint_metadata,
+        RemoteFileSystemReader,
+    )
+
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError(f"alpha must be in [0, 1], got {alpha}")
+
+    dir = normalize_path(dir)
+
+    # NOTE: to avoid making a ton of client requests (S3 or otherwise) we only make those
+    # requests from rank 0 then scatter the result to the other ranks.
+    if get_rank() == 0 and not trainer.checkpointer.dir_is_checkpoint(dir):
+        # Try to find the latest checkpoint in the directory.
+        dir = trainer.checkpointer.latest_checkpoint(dir)
+    dir = scatter_object(dir)
+
+    log.info(f"Loading checkpoint from '{dir}'...")
+    if alpha < 1.0:
+        log.info(f"Using interpolation: alpha={alpha} (final = {alpha}*checkpoint + {1-alpha}*current)")
+
+    # If alpha is 0, skip loading entirely
+    if alpha == 0.0:
+        log.info("alpha=0.0, keeping current model weights")
+        return
+
+    if load_embeddings and alpha == 1.0:
+        # Standard loading path (no interpolation needed)
+        trainer_state = trainer.checkpointer.load(
+            dir,
+            trainer.train_module,
+            load_trainer_state=load_trainer_state,
+            load_optim_state=load_optim_state,
+        )
+        if trainer_state is not None:
+            trainer.load_state_dict(cast(dict, trainer_state))
+    else:
+        # Custom loading path that supports:
+        # - Skipping embeddings (for size mismatches)
+        # - Interpolation between checkpoint and current weights
+        if not load_embeddings:
+            log.info("Skipping embedding weights during checkpoint load (supports size mismatch)")
+
+        model = trainer.train_module.model
+
+        # Save current model state for interpolation
+        if alpha < 1.0:
+            current_state = get_model_state_dict(
+                model,
+                options=StateDictOptions(full_state_dict=False, cpu_offload=False),
+            )
+            # Deep copy the tensors
+            current_state = {k: v.clone() for k, v in current_state.items()}
+
+        # Get the model state dict structure (this gives us the keys we need)
+        model_state = get_model_state_dict(
+            model,
+            options=StateDictOptions(full_state_dict=False, cpu_offload=False),
+        )
+
+        # Filter out embedding and lm_head keys if not loading embeddings
+        # (lm_head typically has the same vocab dimension as embeddings)
+        if not load_embeddings:
+            exclude_patterns = ["embedding", "lm_head"]
+            keys_to_exclude = [
+                k for k in list(model_state.keys())
+                if any(pattern in k.lower() for pattern in exclude_patterns)
+            ]
+            for key in keys_to_exclude:
+                del model_state[key]
+                if alpha < 1.0 and key in current_state:
+                    del current_state[key]
+                log.info(f"Excluding from checkpoint load: {key}")
+
+        # Determine checkpoint directory (could be model_and_optim subdir or root)
+        train_module_dir = f"{dir}/model_and_optim"
+        try:
+            get_checkpoint_metadata(train_module_dir)
+        except FileNotFoundError:
+            train_module_dir = dir
+
+        # Load checkpoint weights
+        dist_cp.load(
+            state_dict={"model": model_state},
+            storage_reader=RemoteFileSystemReader(train_module_dir),
+        )
+
+        # Apply interpolation if alpha < 1.0
+        if alpha < 1.0:
+            log.info(f"Interpolating weights with alpha={alpha}")
+            for key in model_state.keys():
+                if key in current_state:
+                    # final = alpha * checkpoint + (1 - alpha) * current
+                    model_state[key] = alpha * model_state[key] + (1 - alpha) * current_state[key]
+
+        # Apply loaded (and possibly interpolated) weights to model
+        set_model_state_dict(
+            model,
+            model_state_dict=model_state,
+            options=StateDictOptions(full_state_dict=False, cpu_offload=False, strict=False),
+        )
+
+        if alpha < 1.0:
+            log.info(f"Loaded checkpoint with interpolation (alpha={alpha})")
+        else:
+            log.info("Loaded checkpoint excluding embedding weights")
+
+    for callback in trainer.callbacks.values():
+        if hasattr(callback, "post_checkpoint_loaded"):
+            callback.post_checkpoint_loaded(dir)
+
+
+def train(config: ExperimentConfig, checkpoint: Optional[str], load_embeddings: bool = True, alpha: float = 1.0):
     # Set RNG states on all devices.
     seed_all(config.init_seed)
 
@@ -320,7 +512,13 @@ def train(config: ExperimentConfig, checkpoint: Optional[str]):
     trainer = config.trainer.build(train_module, data_loader)
 
     if checkpoint is not None:
-        trainer.load_checkpoint(checkpoint, load_trainer_state=False)
+        load_checkpoint_with_options(
+            trainer,
+            checkpoint,
+            load_trainer_state=False,
+            load_embeddings=load_embeddings,
+            alpha=alpha,
+        )
 
     # Record the config to W&B/Comet and each checkpoint dir.
     config_dict = config.as_config_dict()
@@ -349,6 +547,7 @@ def main(
     beaker_workspace: str = "ai2/OLMo-core",
     use_hostname_constraints: bool = False,
     num_execution_units: Optional[int] = None,
+    tokenizer: Optional[TokenizerConfig] = None,
 ):
     USAGE = f"""
 PPT Phase 1.
@@ -363,6 +562,16 @@ PPT Phase 1.
 
 [b]Model Size[/]
 Optional positional argument after CLUSTER. Must be "190M" or "1B" (default: "190M")
+
+[b]Seed[/]
+Use --seed=N to set the initialization seed (default: 12536)
+
+[b]Embeddings[/]
+Use --no-load-embeddings to skip loading embedding weights from checkpoint (default: load embeddings)
+
+[b]Interpolation[/]
+Use --alpha=N to interpolate between checkpoint and random init: final = alpha*checkpoint + (1-alpha)*random
+(default: 1.0, i.e., fully load checkpoint)
 
 [b]Examples[/]
 $ [i]python {sys.argv[0]} launch run01 ai2/jupiter-cirrascale-2 190M gs://ai2-llm/checkpoints/peteish32/step419000 --launch.num_nodes=2[/]
@@ -381,6 +590,9 @@ $ [i]python {sys.argv[0]} launch run02 ai2/jupiter-cirrascale-2 --launch.num_nod
     model_size = "190M"  # default
     checkpoint = None
     overrides = []
+    seed = 12536  # default seed
+    load_embeddings = True  # default
+    alpha = 1.0  # default
 
     if rest:
         # Check if first arg is model_size (190M or 1B)
@@ -395,7 +607,27 @@ $ [i]python {sys.argv[0]} launch run02 ai2/jupiter-cirrascale-2 --launch.num_nod
         else:
             overrides = rest
 
+    # Extract --seed=N from overrides
+    seed_overrides = [o for o in overrides if o.startswith("--seed=")]
+    if seed_overrides:
+        seed = int(seed_overrides[-1].split("=")[1])
+        overrides = [o for o in overrides if not o.startswith("--seed=")]
+
+    # Extract --no-load-embeddings from overrides
+    if "--no-load-embeddings" in overrides:
+        load_embeddings = False
+        overrides = [o for o in overrides if o != "--no-load-embeddings"]
+
+    # Extract --alpha=N from overrides
+    alpha_overrides = [o for o in overrides if o.startswith("--alpha=")]
+    if alpha_overrides:
+        alpha = float(alpha_overrides[-1].split("=")[1])
+        overrides = [o for o in overrides if not o.startswith("--alpha=")]
+
     cmd = SubCmd(cmd)
+
+    # Use custom tokenizer if provided, otherwise use default with NoPE BOS token
+    effective_tokenizer = tokenizer if tokenizer is not None else get_tokenizer_config()
 
     config = build_config(
         script,
@@ -418,9 +650,8 @@ $ [i]python {sys.argv[0]} launch run02 ai2/jupiter-cirrascale-2 --launch.num_nod
         num_nodes=num_nodes,
         beaker_workspace=beaker_workspace,
         model_size=model_size,
-        # myhu: @willm you might need to uncomment these
-        # use_hostname_constraints=use_hostname_constraints,
-        # num_execution_units=num_execution_units,
+        tokenizer=effective_tokenizer,
+        init_seed=seed,
     )
 
     cmd.prepare_environment(config)
@@ -440,7 +671,7 @@ $ [i]python {sys.argv[0]} launch run02 ai2/jupiter-cirrascale-2 --launch.num_nod
         pass
     elif cmd == SubCmd.train:
         try:
-            train(config, checkpoint)
+            train(config, checkpoint, load_embeddings=load_embeddings, alpha=alpha)
         finally:
             teardown_training_environment()
     elif cmd == SubCmd.train_single:
@@ -457,7 +688,7 @@ $ [i]python {sys.argv[0]} launch run02 ai2/jupiter-cirrascale-2 --launch.num_nod
             )
             config.train_module.tp_config = None
         try:
-            train(config, checkpoint)
+            train(config, checkpoint, load_embeddings=load_embeddings, alpha=alpha)
         finally:
             teardown_training_environment()
     elif cmd == SubCmd.prep:

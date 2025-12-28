@@ -13,7 +13,8 @@ MODEL_SIZE=${2:-"190M"}
 CHECKPOINT=${3:-""}
 FIRST_K=${4:-2}
 METHOD=${5:-"orthogonal"}
-shift 5
+INIT_SCALE=${6:-1.0}
+shift 6
 LAYERS="$@"  # All remaining arguments are layer indices
 
 # Slurm sets the node name automatically
@@ -35,6 +36,7 @@ else
 fi
 echo "First k heads: $FIRST_K"
 echo "Reinit method: $METHOD"
+echo "Init scale: $INIT_SCALE"
 echo "Layers to reinitialize: $LAYERS"
 echo "GPU devices: $CUDA_VISIBLE_DEVICES"
 
@@ -62,13 +64,13 @@ echo "CUDA visible devices: $CUDA_VISIBLE_DEVICES"
 echo "Working directory: $(pwd)"
 
 # Run the training script with reinitialization
-# Arguments order: train_single RUN_NAME NODE_NAME [MODEL_SIZE] [CHECKPOINT] --first_k K --method M --layers L1 [L2 ...]
+# Arguments order: train_single RUN_NAME NODE_NAME [MODEL_SIZE] [CHECKPOINT] --first_k K --method M --init_scale S --layers L1 [L2 ...]
 if [ -n "$CHECKPOINT" ]; then
-    echo "Running: python ./scripts/phase1_reinit.py train_single $RUN_NAME $NODE_NAME $MODEL_SIZE $CHECKPOINT --first_k $FIRST_K --method $METHOD --layers $LAYERS"
-    python ./scripts/phase1_reinit.py train_single "$RUN_NAME" "$NODE_NAME" "$MODEL_SIZE" "$CHECKPOINT" --first_k "$FIRST_K" --method "$METHOD" --layers $LAYERS
+    echo "Running: python ./scripts/phase1_reinit.py train_single $RUN_NAME $NODE_NAME $MODEL_SIZE $CHECKPOINT --first_k $FIRST_K --method $METHOD --init_scale $INIT_SCALE --layers $LAYERS"
+    python ./scripts/phase1_reinit.py train_single "$RUN_NAME" "$NODE_NAME" "$MODEL_SIZE" "$CHECKPOINT" --first_k "$FIRST_K" --method "$METHOD" --init_scale "$INIT_SCALE" --layers $LAYERS
 else
-    echo "Running: python ./scripts/phase1_reinit.py train_single $RUN_NAME $NODE_NAME $MODEL_SIZE --first_k $FIRST_K --method $METHOD --layers $LAYERS"
-    python ./scripts/phase1_reinit.py train_single "$RUN_NAME" "$NODE_NAME" "$MODEL_SIZE" --first_k "$FIRST_K" --method "$METHOD" --layers $LAYERS
+    echo "Running: python ./scripts/phase1_reinit.py train_single $RUN_NAME $NODE_NAME $MODEL_SIZE --first_k $FIRST_K --method $METHOD --init_scale $INIT_SCALE --layers $LAYERS"
+    python ./scripts/phase1_reinit.py train_single "$RUN_NAME" "$NODE_NAME" "$MODEL_SIZE" --first_k "$FIRST_K" --method "$METHOD" --init_scale "$INIT_SCALE" --layers $LAYERS
 fi
 
 # Print completion info

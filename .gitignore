@@ -1,6 +1,7 @@
 data/
 runs/
 logs/
+models/
 scratch.ipynb
 .config.sh
 

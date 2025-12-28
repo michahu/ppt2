@@ -10,7 +10,10 @@
 # Parse command line arguments
 RUN_NAME=${1:-"run01"}
 MODEL_SIZE=${2:-"190M"}
-CHECKPOINT=${3:-""}
+SEED=${3:-"12536"}
+CHECKPOINT=${4:-""}
+LOAD_EMBEDDINGS=${5:-"true"}  # "true" or "false"
+ALPHA=${6:-"1.0"}
 
 # Slurm sets the node name automatically
 NODE_NAME=$(hostname)
@@ -24,11 +27,14 @@ echo "Job ID: $SLURM_JOB_ID"
 echo "Node name: $NODE_NAME"
 echo "Run name: $RUN_NAME"
 echo "Model size: $MODEL_SIZE"
+echo "Seed: $SEED"
 if [ -n "$CHECKPOINT" ]; then
     echo "Checkpoint: $CHECKPOINT"
 else
     echo "Checkpoint: (none - training from scratch)"
 fi
+echo "Load embeddings: $LOAD_EMBEDDINGS"
+echo "Alpha: $ALPHA"
 echo "GPU devices: $CUDA_VISIBLE_DEVICES"
 
 # Load modules (adjust based on your cluster setup)
@@ -56,13 +62,13 @@ echo "Working directory: $(pwd)"
 
 # Run the training script with the new model_size argument
 # Arguments order: train_single RUN_NAME NODE_NAME [MODEL_SIZE] [CHECKPOINT]
-if [ -n "$CHECKPOINT" ]; then
-    echo "Running: python ./scripts/phase1_nyu_wd_ablation.py train_single $RUN_NAME $NODE_NAME $MODEL_SIZE $CHECKPOINT"
-    python ./scripts/phase1_nyu_wd_ablation.py train_single "$RUN_NAME" "$NODE_NAME" "$MODEL_SIZE" "$CHECKPOINT"
-else
-    echo "Running: python ./scripts/phase1_nyu_wd_ablation.py train_single $RUN_NAME $NODE_NAME $MODEL_SIZE"
-    python ./scripts/phase1_nyu_wd_ablation.py train_single "$RUN_NAME" "$NODE_NAME" "$MODEL_SIZE"
-fi
+# if [ -n "$CHECKPOINT" ]; then
+#     echo "Running: python ./scripts/phase1_nyu_wd_ablation.py train_single $RUN_NAME $NODE_NAME $MODEL_SIZE $CHECKPOINT"
+#     python ./scripts/phase1_nyu_wd_ablation.py train_single "$RUN_NAME" "$NODE_NAME" "$MODEL_SIZE" "$CHECKPOINT"
+# else
+#     echo "Running: python ./scripts/phase1_nyu_wd_ablation.py train_single $RUN_NAME $NODE_NAME $MODEL_SIZE"
+#     python ./scripts/phase1_nyu_wd_ablation.py train_single "$RUN_NAME" "$NODE_NAME" "$MODEL_SIZE"
+# fi
 
 # if [ -n "$CHECKPOINT" ]; then
 #     echo "Running: python ./scripts/phase1_nyu_data_constrained.py train_single $RUN_NAME $NODE_NAME $MODEL_SIZE $CHECKPOINT"
@@ -71,6 +77,30 @@ fi
 #     echo "Running: python ./scripts/phase1_nyu_data_constrained.py train_single $RUN_NAME $NODE_NAME $MODEL_SIZE"
 #     python ./scripts/phase1_nyu_data_constrained.py train_single "$RUN_NAME" "$NODE_NAME" "$MODEL_SIZE"
 # fi
+
+# Build command with optional arguments
+CMD="python ./scripts/train_olmo2.py train_single \"$RUN_NAME\" \"$NODE_NAME\" \"$MODEL_SIZE\""
+
+# Add checkpoint if provided
+if [ -n "$CHECKPOINT" ]; then
+    CMD="$CMD \"$CHECKPOINT\""
+fi
+
+# Add seed
+CMD="$CMD --seed=$SEED"
+
+# Add --no-load-embeddings if LOAD_EMBEDDINGS is false
+if [ "$LOAD_EMBEDDINGS" = "false" ]; then
+    CMD="$CMD --no-load-embeddings"
+fi
+
+# Add alpha if not default
+if [ "$ALPHA" != "1.0" ]; then
+    CMD="$CMD --alpha=$ALPHA"
+fi
+
+echo "Running: $CMD"
+eval $CMD
 
 # Print completion info
 echo "Job completed at $(date)"

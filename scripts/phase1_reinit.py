@@ -49,7 +49,7 @@ from olmo_core.utils import seed_all
 
 # Import our reinitialization functions
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from src.init import reinit_qk_orthogonal, reinit_qk_zeros
+from src.init import reinit_qk_orthogonal, reinit_qk_zeros, reinit_qk_scale
 
 SEQUENCE_LENGTH = 2048
 GLOBAL_BATCH_SIZE = 256 * SEQUENCE_LENGTH
@@ -100,7 +100,7 @@ class ExperimentConfig(Config):
     reinit_first_k: Optional[int] = None
     reinit_layers: Optional[List[int]] = None
     reinit_scale: float = 1.0
-    reinit_method: str = "orthogonal"  # "orthogonal" or "zeros"
+    reinit_method: str = "orthogonal"  # "orthogonal", "zeros", or "scale"
 
 
 def build_model_config(
@@ -225,7 +225,7 @@ def build_trainer_config(common: CommonComponents) -> TrainerConfig:
         .with_callback(
             "checkpointer",
             CheckpointerCallback(
-                save_interval=250,  # willm: 500 corresponds to original paper
+                save_interval=30000,
                 ephemeral_save_interval=None,
                 save_async=True,
             ),
@@ -380,9 +380,17 @@ def train(config: ExperimentConfig, checkpoint: Optional[str]):
                 layers=config.reinit_layers,
                 init_scale=config.reinit_scale,
             )
+        elif config.reinit_method == "scale":
+            reinit_qk_scale(
+                model=model_to_reinit,
+                config=config.model,
+                first_k=config.reinit_first_k,
+                layers=config.reinit_layers,
+                init_scale=config.reinit_scale,
+            )
         else:
             raise ValueError(
-                f"Invalid reinit_method: {config.reinit_method}. Must be 'orthogonal' or 'zeros'"
+                f"Invalid reinit_method: {config.reinit_method}. Must be 'orthogonal', 'zeros', or 'scale'"
             )
 
         if get_local_rank() == 0:
@@ -433,8 +441,8 @@ Optional positional argument after CLUSTER. Must be "190M" or "1B" (default: "19
 [b]QK Reinitialization Arguments (Required)[/]
 [b cyan]--first_k K:[/]    Number of attention heads to reinitialize (the first k heads)
 [b cyan]--layers L1 [L2 ...]:[/]  Layer indices to reinitialize (e.g., "0 1 2" or "all" for all layers)
-[b cyan]--method M:[/]     Reinitialization method: "orthogonal" or "zeros" (default: "orthogonal")
-[b cyan]--init_scale S:[/] Scaling factor for orthogonal initialization (default: 1.0, only used with orthogonal)
+[b cyan]--method M:[/]     Reinitialization method: "orthogonal", "zeros", or "scale" (default: "orthogonal")
+[b cyan]--init_scale S:[/] Scaling factor (default: 1.0, for orthogonal/scale methods)
 
 [b]Examples[/]
 $ [i]python {sys.argv[0]} launch run01 ai2/jupiter-cirrascale-2 190M gs://ai2-llm/checkpoints/peteish32/step419000 --first_k 2 --layers 0 1 --launch.num_nodes=2[/]
@@ -498,9 +506,9 @@ $ [i]python {sys.argv[0]} launch run02 ai2/jupiter-cirrascale-2 --first_k 2 --la
         elif overrides[i] == "--method":
             if i + 1 < len(overrides):
                 method = overrides[i + 1].lower()
-                if method not in ["orthogonal", "zeros"]:
+                if method not in ["orthogonal", "zeros", "scale"]:
                     raise ValueError(
-                        f"Invalid method: {method}. Must be 'orthogonal' or 'zeros'"
+                        f"Invalid method: {method}. Must be 'orthogonal', 'zeros', or 'scale'"
                     )
                 reinit_method = method
                 i += 2

@@ -5,6 +5,9 @@ models/
 scratch.ipynb
 .config.sh
 
+# Singularity/Apptainer container images
+container/*.sif
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

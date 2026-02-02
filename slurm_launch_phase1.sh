@@ -3,7 +3,7 @@
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
 #SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:1 -C "a100|h100"
+#SBATCH --gres=gpu:1
 #SBATCH --mem=64GB
 #SBATCH --time=48:00:00
 
@@ -37,53 +37,63 @@ echo "Load embeddings: $LOAD_EMBEDDINGS"
 echo "Alpha: $ALPHA"
 echo "GPU devices: $CUDA_VISIBLE_DEVICES"
 
-# Load modules (adjust based on your cluster setup)
-# module load python/3.12
-module avail cuda
-module load cuda/11.6.2
+# ===========================================
+# SINGULARITY CONFIGURATION
+# ===========================================
+SINGULARITY="/share/apps/apptainer/bin/singularity"
+PROJECT_ROOT="/scratch/myh2014/ppt2"
+SIF_PATH="${PROJECT_ROOT}/container/ppt2.sif"
 
-# Activate virtual environment
-source .venv/bin/activate
+# Verify container exists
+if [ ! -f "$SIF_PATH" ]; then
+    echo "Error: Container not found at $SIF_PATH"
+    echo "Run ./container/pull_container.sh first"
+    exit 1
+fi
 
-# Ensure we're in the right directory
-cd /home/myh2014/code/ppt2
+# Define singularity exec command with bind mounts
+SING_EXEC="$SINGULARITY exec --nv \
+    --bind ${PROJECT_ROOT}:${PROJECT_ROOT} \
+    --bind /scratch:/scratch \
+    --bind $HOME:$HOME \
+    --pwd ${PROJECT_ROOT} \
+    ${SIF_PATH}"
 
-# Source WANDB configuration
-source .config.sh
+# Auto-setup: ensure uv and dependencies are installed
+if [ ! -d "${PROJECT_ROOT}/.venv" ]; then
+    echo "Virtual environment not found. Running first-time setup..."
+    $SING_EXEC bash -c "
+        export PATH=\$HOME/.local/bin:\$PATH
+        if ! command -v uv &> /dev/null; then
+            echo 'Installing uv...'
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+        fi
+        cd ${PROJECT_ROOT}
+        export MAX_JOBS=4
+        uv sync --python 3.11
+    "
+fi
+
+# Source WANDB configuration (outside container)
+if [ -f "${PROJECT_ROOT}/.config.sh" ]; then
+    source "${PROJECT_ROOT}/.config.sh"
+fi
 
 # Set environment variables for better performance
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
-export CUDA_VISIBLE_DEVICES=$SLURM_LOCALID
 
 # Print environment info
-echo "Python version: $(python --version)"
-echo "CUDA visible devices: $CUDA_VISIBLE_DEVICES"
-echo "Working directory: $(pwd)"
-
-# Run the training script with the new model_size argument
-# Arguments order: train_single RUN_NAME NODE_NAME [MODEL_SIZE] [CHECKPOINT]
-# if [ -n "$CHECKPOINT" ]; then
-#     echo "Running: python ./scripts/phase1_nyu_wd_ablation.py train_single $RUN_NAME $NODE_NAME $MODEL_SIZE $CHECKPOINT"
-#     python ./scripts/phase1_nyu_wd_ablation.py train_single "$RUN_NAME" "$NODE_NAME" "$MODEL_SIZE" "$CHECKPOINT"
-# else
-#     echo "Running: python ./scripts/phase1_nyu_wd_ablation.py train_single $RUN_NAME $NODE_NAME $MODEL_SIZE"
-#     python ./scripts/phase1_nyu_wd_ablation.py train_single "$RUN_NAME" "$NODE_NAME" "$MODEL_SIZE"
-# fi
-
-# if [ -n "$CHECKPOINT" ]; then
-#     echo "Running: python ./scripts/phase1_nyu_data_constrained.py train_single $RUN_NAME $NODE_NAME $MODEL_SIZE $CHECKPOINT"
-#     python ./scripts/phase1_nyu_data_constrained.py train_single "$RUN_NAME" "$NODE_NAME" "$MODEL_SIZE" "$CHECKPOINT"
-# else
-#     echo "Running: python ./scripts/phase1_nyu_data_constrained.py train_single $RUN_NAME $NODE_NAME $MODEL_SIZE"
-#     python ./scripts/phase1_nyu_data_constrained.py train_single "$RUN_NAME" "$NODE_NAME" "$MODEL_SIZE"
-# fi
+echo "Singularity container: $SIF_PATH"
+$SING_EXEC python --version
+$SING_EXEC nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv
+echo "Working directory: ${PROJECT_ROOT}"
 
 # Build command with optional arguments
-CMD="python ./scripts/train_olmo2.py train_single \"$RUN_NAME\" \"$NODE_NAME\" \"$MODEL_SIZE\""
+CMD="python ./scripts/train_olmo2.py train_single '$RUN_NAME' '$NODE_NAME' '$MODEL_SIZE'"
 
 # Add checkpoint if provided
 if [ -n "$CHECKPOINT" ]; then
-    CMD="$CMD \"$CHECKPOINT\""
+    CMD="$CMD '$CHECKPOINT'"
 fi
 
 # Add seed
@@ -100,7 +110,13 @@ if [ "$ALPHA" != "1.0" ]; then
 fi
 
 echo "Running: $CMD"
-eval $CMD
+$SING_EXEC bash -c "
+    source ${PROJECT_ROOT}/.venv/bin/activate
+    export WANDB_API_KEY='${WANDB_API_KEY}'
+    export WANDB_PROJECT='${WANDB_PROJECT:-ppt2}'
+    cd ${PROJECT_ROOT}
+    $CMD
+"
 
 # Print completion info
 echo "Job completed at $(date)"

@@ -6,18 +6,19 @@ import logging
 import sys
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Union
 
 from olmo_core.config import Config, DType
 from olmo_core.data import (
     NumpyDataLoaderConfig,
-    NumpyDatasetConfig,
-    NumpyDatasetType,
+    NumpyFSLDatasetConfig,
+    TokenizerConfig,
 )
 from olmo_core.distributed.parallel import DataParallelType
 from olmo_core.float8 import Float8Config
 from olmo_core.internal.common import CLUSTER_TO_GPU_TYPE
 from olmo_core.internal.experiment import (
+    CliContext,
     CommonComponents,
     SubCmd,
     build_common_components,
@@ -32,6 +33,7 @@ from olmo_core.train import (
 )
 from olmo_core.train.callbacks import (
     CheckpointerCallback,
+    ConfigSaverCallback,
     WandBCallback,
 )
 from olmo_core.train.train_module import (
@@ -50,13 +52,56 @@ N_TOKENS = 1000 * GLOBAL_BATCH_SIZE
 # GLOBAL_BATCH_SIZE = 4 * 1024 * 1024
 # WARMUP_STEPS = 2000
 
-DATA_ROOT = "/vast/myh2014/data".rstrip("/")
+DATA_ROOT = "/scratch/myh2014/data".rstrip("/")
 DATA_PATHS = [
     f"{DATA_ROOT}/olmo_ppt.npy",
 ]
-DATA_WORK_DIR = "scratch/myh2014/ppt2/data/"
-
+DATA_WORK_DIR = "/scratch/myh2014/ppt2/data/"
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class LocalCommonComponents:
+    """
+    Minimal CommonComponents-compatible class for local/NYU cluster execution.
+    Bypasses olmo_core's cluster detection which only recognizes AI2's Beaker clusters.
+    """
+    run_name: str
+    launch: Optional[BeakerLaunchConfig]
+    tokenizer: TokenizerConfig
+    global_batch_size: int
+    sequence_length: int
+
+
+def build_common_components_local(
+    cli_context: CliContext,
+    tokenizer: TokenizerConfig,
+    global_batch_size: int,
+    max_sequence_length: int,
+    **kwargs,
+) -> Union[LocalCommonComponents, CommonComponents]:
+    """
+    Custom builder for local/NYU cluster execution that bypasses olmo_core's
+    cluster detection which only recognizes AI2's Beaker clusters.
+    """
+    if cli_context.cluster == "local":
+        # For local execution, create a minimal CommonComponents-compatible object
+        return LocalCommonComponents(
+            run_name=cli_context.run_name,
+            launch=None,  # No Beaker launch for local execution
+            tokenizer=tokenizer,
+            global_batch_size=global_batch_size,
+            sequence_length=max_sequence_length,
+        )
+    else:
+        # For recognized clusters, use the standard builder
+        return build_common_components(
+            cli_context,
+            tokenizer=tokenizer,
+            global_batch_size=global_batch_size,
+            max_sequence_length=max_sequence_length,
+            **kwargs,
+        )
 
 
 @dataclass
@@ -64,7 +109,7 @@ class ExperimentConfig(Config):
     run_name: str
     launch: Optional[BeakerLaunchConfig]
     model: TransformerConfig
-    dataset: NumpyDatasetConfig
+    dataset: NumpyFSLDatasetConfig
     data_loader: NumpyDataLoaderConfig
     train_module: TransformerTrainModuleConfig
     trainer: TrainerConfig
@@ -144,9 +189,12 @@ def build_train_module_config(
     else:
         raise ValueError(f"Invalid model size: {model_size}. Must be '190M' or '1B'")
 
+    # For local execution, use sequence_length directly; for Beaker, use dataset config
+    max_seq_len = getattr(common, 'sequence_length', None) or common.dataset.effective_sequence_length
+
     return TransformerTrainModuleConfig(
         rank_microbatch_size=rank_microbatch_size,
-        max_sequence_length=common.dataset.effective_sequence_length,
+        max_sequence_length=max_seq_len,
         optim=SkipStepAdamWConfig(
             lr=learning_rate,
             weight_decay=0.033,
@@ -194,7 +242,7 @@ def build_trainer_config(common: CommonComponents) -> TrainerConfig:
             CheckpointerCallback(
                 save_interval=250,  # willm: 500 corresponds to original paper
                 ephemeral_save_interval=None,
-                save_async=True,
+                save_async=False,  # Disabled due to PyTorch version compatibility
             ),
         )
         .with_callback(
@@ -207,6 +255,10 @@ def build_trainer_config(common: CommonComponents) -> TrainerConfig:
                 enabled=True,
                 cancel_check_interval=cancel_check_interval,
             ),
+        )
+        .with_callback(
+            "config_saver",
+            ConfigSaverCallback(),
         )
     )
 
@@ -226,33 +278,62 @@ def build_config(
     trainer_config_builder: Callable[[CommonComponents], TrainerConfig],
     finalize_config: Optional[Callable[[ExperimentConfig], None]] = None,
     model_size: str = "1B",
+    global_batch_size: int = GLOBAL_BATCH_SIZE,
+    sequence_length: int = SEQUENCE_LENGTH,
+    beaker_image: str = OLMoCoreBeakerImage.stable,
+    num_nodes: int = 1,
+    beaker_workspace: str = "ai2/OLMo-core",
     **kwargs,
 ) -> ExperimentConfig:
-    common = common_config_builder(script, cmd, run_name, cluster, overrides, **kwargs)
+    # Create CLI context for the new API
+    cli_context = CliContext(
+        script=script,
+        cmd=cmd,
+        run_name=run_name,
+        cluster=cluster,
+        overrides=overrides,
+    )
+
+    # Use dolma2 tokenizer as default
+    tokenizer = TokenizerConfig.dolma2()
+
+    # Build common components with new API
+    common = common_config_builder(
+        cli_context,
+        tokenizer=tokenizer,
+        global_batch_size=global_batch_size,
+        max_sequence_length=sequence_length,
+        beaker_image=beaker_image,
+        num_nodes=num_nodes,
+        beaker_workspace=beaker_workspace,
+    )
 
     model = model_config_builder(common, model_size)
 
-    dataset = NumpyDatasetConfig(
+    dataset = NumpyFSLDatasetConfig(
         # @willm might be called data_paths
         paths=DATA_PATHS,
-        name=NumpyDatasetType.fsl,
         work_dir=DATA_WORK_DIR,
         tokenizer=common.tokenizer,
         sequence_length=SEQUENCE_LENGTH,
         max_target_sequence_length=8192,
     )
 
+    # Build data loader config directly
+    data_loader = NumpyDataLoaderConfig(
+        global_batch_size=global_batch_size,
+        seed=34521,
+        num_workers=4,
+    )
+
     trainer = trainer_config_builder(common)
-    for name, cb in common.callbacks.items():
-        if name not in trainer.callbacks:
-            trainer.add_callback(name, cb)
 
     config = ExperimentConfig(
         run_name=run_name,
         launch=common.launch,
         model=model,
         dataset=dataset,
-        data_loader=common.data_loader,
+        data_loader=data_loader,
         train_module=train_module_config_builder(common, model_size),
         trainer=trainer,
     )
@@ -270,7 +351,7 @@ def build_config(
 def main(
     *,
     global_batch_size: int,
-    common_config_builder: Callable[..., CommonComponents] = build_common_components,
+    common_config_builder: Callable[..., CommonComponents] = build_common_components_local,
     model_config_builder: Callable[[CommonComponents, str], TransformerConfig],
     train_module_config_builder: Callable[
         [CommonComponents, str], TransformerTrainModuleConfig

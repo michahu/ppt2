@@ -10,14 +10,16 @@ from olmo_core.config import Config, DType
 from olmo_core.data import (
     DataMix,
     NumpyDataLoaderConfig,
-    NumpyDatasetConfig,
-    NumpyDatasetType,
+    NumpyFSLDatasetConfig,
+    NumpyPaddedFSLDatasetConfig,
+    TokenizerConfig,
 )
 from olmo_core.distributed.parallel import DataParallelType
 from olmo_core.distributed.utils import get_local_rank
 from olmo_core.float8 import Float8Config
 from olmo_core.internal.common import CLUSTER_TO_GPU_TYPE
 from olmo_core.internal.experiment import (
+    CliContext,
     CommonComponents,
     SubCmd,
     build_common_components,
@@ -91,7 +93,7 @@ class ExperimentConfig(Config):
     run_name: str
     launch: Optional[BeakerLaunchConfig]
     model: TransformerConfig
-    dataset: NumpyDatasetConfig
+    dataset: NumpyFSLDatasetConfig
     data_loader: NumpyDataLoaderConfig
     train_module: TransformerTrainModuleConfig
     trainer: TrainerConfig
@@ -244,9 +246,8 @@ def build_trainer_config(common: CommonComponents) -> TrainerConfig:
         .with_callback(
             "lm_evaluator",
             LMEvaluatorCallbackConfig(
-                eval_dataset=NumpyDatasetConfig.from_data_mix(
+                eval_dataset=NumpyPaddedFSLDatasetConfig.from_data_mix(
                     DataMix.v3_small_ppl_validation,
-                    name=NumpyDatasetType.padded_fsl,
                     mix_base_dir=DATA_ROOT,
                     sequence_length=SEQUENCE_LENGTH,
                     tokenizer=common.tokenizer,
@@ -278,26 +279,55 @@ def build_config(
     reinit_layers: Optional[Union[List[int], str]] = None,
     reinit_scale: float = 1.0,
     reinit_method: str = "orthogonal",
+    global_batch_size: int = GLOBAL_BATCH_SIZE,
+    sequence_length: int = SEQUENCE_LENGTH,
+    beaker_image: str = OLMoCoreBeakerImage.stable,
+    num_nodes: int = 1,
+    beaker_workspace: str = "ai2/OLMo-core",
     **kwargs,
 ) -> ExperimentConfig:
-    common = common_config_builder(script, cmd, run_name, cluster, overrides, **kwargs)
+    # Create CLI context for the new API
+    cli_context = CliContext(
+        script=script,
+        cmd=cmd,
+        run_name=run_name,
+        cluster=cluster,
+        overrides=overrides,
+    )
+
+    # Use dolma2 tokenizer as default
+    tokenizer = TokenizerConfig.dolma2()
+
+    # Build common components with new API
+    common = common_config_builder(
+        cli_context,
+        tokenizer=tokenizer,
+        global_batch_size=global_batch_size,
+        max_sequence_length=sequence_length,
+        beaker_image=beaker_image,
+        num_nodes=num_nodes,
+        beaker_workspace=beaker_workspace,
+    )
 
     model = model_config_builder(common, model_size)
 
-    dataset = NumpyDatasetConfig(
+    dataset = NumpyFSLDatasetConfig(
         # @willm might be called data_paths
         paths=DATA_PATHS,
-        name=NumpyDatasetType.fsl,
         work_dir=DATA_WORK_DIR,
         tokenizer=common.tokenizer,
         sequence_length=SEQUENCE_LENGTH,
         max_target_sequence_length=8192,
     )
 
+    # Build data loader config directly
+    data_loader = NumpyDataLoaderConfig(
+        global_batch_size=global_batch_size,
+        seed=34521,
+        num_workers=4,
+    )
+
     trainer = trainer_config_builder(common)
-    for name, cb in common.callbacks.items():
-        if name not in trainer.callbacks:
-            trainer.add_callback(name, cb)
 
     # Parse reinit_layers if it's "all"
     parsed_reinit_layers = None
@@ -312,7 +342,7 @@ def build_config(
         launch=common.launch,
         model=model,
         dataset=dataset,
-        data_loader=common.data_loader,
+        data_loader=data_loader,
         train_module=train_module_config_builder(common, model_size),
         trainer=trainer,
         reinit_first_k=reinit_first_k,

@@ -56,7 +56,6 @@ fi
 
 # Define singularity exec command with bind mounts
 SING_EXEC="$SINGULARITY exec --nv \
-    --bind ${PROJECT_ROOT}:${PROJECT_ROOT} \
     --bind /scratch:/scratch \
     --bind $HOME:$HOME \
     --pwd ${PROJECT_ROOT} \

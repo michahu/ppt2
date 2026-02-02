@@ -48,6 +48,7 @@ $SINGULARITY exec \
         cd '"$PROJECT_ROOT"'
 
         echo "Syncing dependencies..."
+        export UV_LINK_MODE=copy
         uv sync --python 3.11
 
         echo ""

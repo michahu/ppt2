@@ -6,6 +6,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --mem=64GB
 #SBATCH --time=48:00:00
+#SBATCH --account=torch_pr_375_general
 
 # Parse command line arguments
 RUN_NAME=${1:-"run01"}
@@ -41,8 +42,6 @@ fi
 
 # Define singularity exec command with bind mounts
 SING_EXEC="$SINGULARITY exec --nv \
-    --bind ${PROJECT_ROOT}:${PROJECT_ROOT} \
-    --bind /scratch:/scratch \
     --bind $HOME:$HOME \
     --pwd ${PROJECT_ROOT} \
     ${SIF_PATH}"
@@ -77,13 +76,18 @@ $SING_EXEC nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv
 echo "Working directory: ${PROJECT_ROOT}"
 
 # Run the training script with model_size argument
-echo "Running: python ./scripts/phase0_nyu.py train_single $RUN_NAME $NODE_NAME $MODEL_SIZE"
+# Note: Using "local" as cluster since train_single doesn't need Beaker cluster info
+CLUSTER="local"
+echo "Running: python ./scripts/phase0_nyu.py train_single $RUN_NAME $CLUSTER $MODEL_SIZE"
 $SING_EXEC bash -c "
+    export LD_LIBRARY_PATH=\$LD_LIBRARY_PATH:/usr/local/cuda-12.6/compat/lib.real
+    export TRITON_LIBCUDA_PATH=/usr/local/cuda-12.6/compat/lib.real
     source ${PROJECT_ROOT}/.venv/bin/activate
     export WANDB_API_KEY='${WANDB_API_KEY}'
     export WANDB_PROJECT='${WANDB_PROJECT:-ppt2}'
+    export PYTHONPATH='${PROJECT_ROOT}:\$PYTHONPATH'
     cd ${PROJECT_ROOT}
-    python ./scripts/phase0_nyu.py train_single '$RUN_NAME' '$NODE_NAME' '$MODEL_SIZE'
+    python ./scripts/phase0_nyu.py train_single '$RUN_NAME' 'local' '$MODEL_SIZE'
 "
 
 # Print completion info

@@ -43,6 +43,8 @@ fi
 # Define singularity exec command with bind mounts
 SING_EXEC="$SINGULARITY exec --nv \
     --bind $HOME:$HOME \
+    --bind /etc/ssl/certs:/etc/ssl/certs:ro \
+    --bind /etc/pki:/etc/pki:ro \
     --pwd ${PROJECT_ROOT} \
     ${SIF_PATH}"
 

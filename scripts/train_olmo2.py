@@ -51,13 +51,15 @@ from olmo_core.utils import seed_all
 from olmo_core.distributed.utils import get_rank, scatter_object
 from olmo_core.io import normalize_path
 
+from utils import LocalCommonComponents, build_common_components_local
+
 USE_NOPE = True
 SEQUENCE_LENGTH = 2048
 GLOBAL_BATCH_SIZE = 256 * SEQUENCE_LENGTH
 WARMUP_STEPS = 1000
 N_TOKENS = 50_000 * GLOBAL_BATCH_SIZE
 
-DATA_ROOT = "/vast/myh2014/data".rstrip("/")
+DATA_ROOT = "/scratch/myh2014/data".rstrip("/")
 
 
 def _read_data_mix_file(filename: str) -> List[str]:
@@ -208,9 +210,12 @@ def build_train_module_config(
     else:
         raise ValueError(f"Invalid model size: {model_size}. Must be '190M' or '1B'")
 
+    # For local execution, use sequence_length directly; for Beaker, use dataset config
+    max_seq_len = getattr(common, 'sequence_length', None) or common.dataset.effective_sequence_length
+
     return TransformerTrainModuleConfig(
         rank_microbatch_size=rank_microbatch_size,
-        max_sequence_length=common.dataset.effective_sequence_length,
+        max_sequence_length=max_seq_len,
         optim=SkipStepAdamWConfig(
             lr=learning_rate,
             weight_decay=0.033,
@@ -256,7 +261,7 @@ def build_trainer_config(common: CommonComponents) -> TrainerConfig:
         .with_callback(
             "checkpointer",
             CheckpointerCallback(
-                save_interval=5000,
+                save_interval=10000,
                 ephemeral_save_interval=None,
                 save_async=True,
             ),
@@ -266,11 +271,14 @@ def build_trainer_config(common: CommonComponents) -> TrainerConfig:
             WandBCallback(
                 name=run_name,
                 group=common.run_name,
-                entity="ai2-llm",
-                project="willm-ppt2",
+                project="ppt2",
                 enabled=True,
                 cancel_check_interval=cancel_check_interval,
             ),
+        )
+        .with_callback(
+            "config_saver",
+            ConfigSaverCallback(),
         )
         .with_callback(
             "lm_evaluator",
@@ -296,7 +304,7 @@ def build_config(
     checkpoint: Optional[str],
     overrides: List[str],
     *,
-    common_config_builder: Callable[..., CommonComponents] = build_common_components,
+    common_config_builder: Callable[..., CommonComponents] = build_common_components_local,
     model_config_builder: Callable[[CommonComponents, str], TransformerConfig],
     train_module_config_builder: Callable[
         [CommonComponents, str], TransformerTrainModuleConfig
@@ -551,7 +559,7 @@ def train(config: ExperimentConfig, checkpoint: Optional[str], load_embeddings: 
 def main(
     *,
     global_batch_size: int,
-    common_config_builder: Callable[..., CommonComponents] = build_common_components,
+    common_config_builder: Callable[..., CommonComponents] = build_common_components_local,
     model_config_builder: Callable[[CommonComponents, str], TransformerConfig],
     train_module_config_builder: Callable[
         [CommonComponents, str], TransformerTrainModuleConfig

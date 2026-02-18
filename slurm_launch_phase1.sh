@@ -3,17 +3,68 @@
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
 #SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:1 -C "h200"
 #SBATCH --mem=64GB
 #SBATCH --time=48:00:00
+#SBATCH --account=torch_pr_375_general
+
+# Default values
+RUN_NAME="run01"
+MODEL_SIZE="190M"
+SEED="12536"
+CHECKPOINT=""
+LOAD_EMBEDDINGS="true"
+ALPHA="1.0"
 
 # Parse command line arguments
-RUN_NAME=${1:-"run01"}
-MODEL_SIZE=${2:-"190M"}
-SEED=${3:-"12536"}
-CHECKPOINT=${4:-""}
-LOAD_EMBEDDINGS=${5:-"true"}  # "true" or "false"
-ALPHA=${6:-"1.0"}
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --run-name)
+            RUN_NAME="$2"
+            shift 2
+            ;;
+        --model-size)
+            MODEL_SIZE="$2"
+            shift 2
+            ;;
+        --seed)
+            SEED="$2"
+            shift 2
+            ;;
+        --checkpoint)
+            CHECKPOINT="$2"
+            shift 2
+            ;;
+        --load-embeddings)
+            LOAD_EMBEDDINGS="true"
+            shift
+            ;;
+        --no-load-embeddings)
+            LOAD_EMBEDDINGS="false"
+            shift
+            ;;
+        --alpha)
+            ALPHA="$2"
+            shift 2
+            ;;
+        --help)
+            echo "Usage: $0 [OPTIONS]"
+            echo "Options:"
+            echo "  --run-name NAME       Run name (default: run01)"
+            echo "  --model-size SIZE     Model size (default: 190M)"
+            echo "  --seed SEED           Random seed (default: 12536)"
+            echo "  --checkpoint PATH     Checkpoint path (default: none)"
+            echo "  --load-embeddings     Load embeddings from checkpoint (default)"
+            echo "  --no-load-embeddings  Don't load embeddings"
+            echo "  --alpha VALUE         Alpha value (default: 1.0)"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
 
 # Slurm sets the node name automatically
 NODE_NAME=$(hostname)
@@ -53,8 +104,9 @@ fi
 
 # Define singularity exec command with bind mounts
 SING_EXEC="$SINGULARITY exec --nv \
-    --bind /scratch:/scratch \
     --bind $HOME:$HOME \
+    --bind /etc/ssl/certs:/etc/ssl/certs:ro \
+    --bind /etc/pki:/etc/pki:ro \
     --pwd ${PROJECT_ROOT} \
     ${SIF_PATH}"
 
@@ -110,12 +162,20 @@ fi
 
 echo "Running: $CMD"
 $SING_EXEC bash -c "
+    export LD_LIBRARY_PATH=\$LD_LIBRARY_PATH:/usr/local/cuda-12.6/compat/lib.real
+    export TRITON_LIBCUDA_PATH=/usr/local/cuda-12.6/compat/lib.real
     source ${PROJECT_ROOT}/.venv/bin/activate
     export WANDB_API_KEY='${WANDB_API_KEY}'
     export WANDB_PROJECT='${WANDB_PROJECT:-ppt2}'
+    export PYTHONPATH='${PROJECT_ROOT}:\$PYTHONPATH'
     cd ${PROJECT_ROOT}
     $CMD
 "
+
+# export TORCHINDUCTOR_CACHE_DIR=/tmp/torch_inductor_cache
+# export TORCH_INDUCTOR_PAD_MM_BENCHMARK=0
+# export TORCHINDUCTOR_FX_GRAPH_CACHE=0
+# export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Print completion info
 echo "Job completed at $(date)"

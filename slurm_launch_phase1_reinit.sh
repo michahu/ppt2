@@ -6,6 +6,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --mem=64GB
 #SBATCH --time=48:00:00
+#SBATCH --account=torch_pr_375_general
 
 # Parse command line arguments
 RUN_NAME=${1:-"run01"}
@@ -56,8 +57,9 @@ fi
 
 # Define singularity exec command with bind mounts
 SING_EXEC="$SINGULARITY exec --nv \
-    --bind /scratch:/scratch \
     --bind $HOME:$HOME \
+    --bind /etc/ssl/certs:/etc/ssl/certs:ro \
+    --bind /etc/pki:/etc/pki:ro \
     --pwd ${PROJECT_ROOT} \
     ${SIF_PATH}"
 
@@ -94,18 +96,24 @@ echo "Working directory: ${PROJECT_ROOT}"
 if [ -n "$CHECKPOINT" ]; then
     echo "Running: python ./scripts/phase1_reinit.py train_single $RUN_NAME $NODE_NAME $MODEL_SIZE $CHECKPOINT --first_k $FIRST_K --method $METHOD --init_scale $INIT_SCALE --layers $LAYERS"
     $SING_EXEC bash -c "
+        export LD_LIBRARY_PATH=\$LD_LIBRARY_PATH:/usr/local/cuda-12.6/compat/lib.real
+        export TRITON_LIBCUDA_PATH=/usr/local/cuda-12.6/compat/lib.real
         source ${PROJECT_ROOT}/.venv/bin/activate
         export WANDB_API_KEY='${WANDB_API_KEY}'
         export WANDB_PROJECT='${WANDB_PROJECT:-ppt2}'
+        export PYTHONPATH='${PROJECT_ROOT}:\$PYTHONPATH'
         cd ${PROJECT_ROOT}
         python ./scripts/phase1_reinit.py train_single '$RUN_NAME' '$NODE_NAME' '$MODEL_SIZE' '$CHECKPOINT' --first_k $FIRST_K --method $METHOD --init_scale $INIT_SCALE --layers $LAYERS
     "
 else
     echo "Running: python ./scripts/phase1_reinit.py train_single $RUN_NAME $NODE_NAME $MODEL_SIZE --first_k $FIRST_K --method $METHOD --init_scale $INIT_SCALE --layers $LAYERS"
     $SING_EXEC bash -c "
+        export LD_LIBRARY_PATH=\$LD_LIBRARY_PATH:/usr/local/cuda-12.6/compat/lib.real
+        export TRITON_LIBCUDA_PATH=/usr/local/cuda-12.6/compat/lib.real
         source ${PROJECT_ROOT}/.venv/bin/activate
         export WANDB_API_KEY='${WANDB_API_KEY}'
         export WANDB_PROJECT='${WANDB_PROJECT:-ppt2}'
+        export PYTHONPATH='${PROJECT_ROOT}:\$PYTHONPATH'
         cd ${PROJECT_ROOT}
         python ./scripts/phase1_reinit.py train_single '$RUN_NAME' '$NODE_NAME' '$MODEL_SIZE' --first_k $FIRST_K --method $METHOD --init_scale $INIT_SCALE --layers $LAYERS
     "

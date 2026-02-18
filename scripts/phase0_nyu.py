@@ -42,6 +42,8 @@ from olmo_core.train.train_module import (
     TransformerTrainModuleConfig,
 )
 
+from utils import LocalCommonComponents, build_common_components_local
+
 # === willm: taken from https://arxiv.org/abs/2502.19249 ===
 SEQUENCE_LENGTH = 2048
 GLOBAL_BATCH_SIZE = 32 * SEQUENCE_LENGTH
@@ -58,50 +60,6 @@ DATA_PATHS = [
 ]
 DATA_WORK_DIR = "/scratch/myh2014/ppt2/data/"
 log = logging.getLogger(__name__)
-
-
-@dataclass
-class LocalCommonComponents:
-    """
-    Minimal CommonComponents-compatible class for local/NYU cluster execution.
-    Bypasses olmo_core's cluster detection which only recognizes AI2's Beaker clusters.
-    """
-    run_name: str
-    launch: Optional[BeakerLaunchConfig]
-    tokenizer: TokenizerConfig
-    global_batch_size: int
-    sequence_length: int
-
-
-def build_common_components_local(
-    cli_context: CliContext,
-    tokenizer: TokenizerConfig,
-    global_batch_size: int,
-    max_sequence_length: int,
-    **kwargs,
-) -> Union[LocalCommonComponents, CommonComponents]:
-    """
-    Custom builder for local/NYU cluster execution that bypasses olmo_core's
-    cluster detection which only recognizes AI2's Beaker clusters.
-    """
-    if cli_context.cluster == "local":
-        # For local execution, create a minimal CommonComponents-compatible object
-        return LocalCommonComponents(
-            run_name=cli_context.run_name,
-            launch=None,  # No Beaker launch for local execution
-            tokenizer=tokenizer,
-            global_batch_size=global_batch_size,
-            sequence_length=max_sequence_length,
-        )
-    else:
-        # For recognized clusters, use the standard builder
-        return build_common_components(
-            cli_context,
-            tokenizer=tokenizer,
-            global_batch_size=global_batch_size,
-            max_sequence_length=max_sequence_length,
-            **kwargs,
-        )
 
 
 @dataclass
